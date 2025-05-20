@@ -1,12 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+    control-plane: controller-manager
+  name: llama-stack-k8s-operator-system
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.17.3
-  name: llamastackdistributions.llama.x-k8s.io
+    controller-gen.kubebuilder.io/version: v0.17.2
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llamastackdistributions.llamastack.io
 spec:
-  group: llama.x-k8s.io
+  group: llamastack.io
   names:
     kind: LlamaStackDistribution
     listKind: LlamaStackDistributionList
@@ -1965,6 +1976,22 @@ spec:
                           type: object
                         type: array
                     type: object
+                  storage:
+                    description: Storage defines the persistent storage configuration
+                    properties:
+                      mountPath:
+                        description: MountPath is the path where the storage will
+                          be mounted in the container
+                        type: string
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: Size is the size of the persistent volume claim
+                          created for holding persistent data of the llama-stack server
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
                 required:
                 - containerSpec
                 - distribution
@@ -2012,3 +2039,345 @@ spec:
     storage: true
     subresources:
       status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-controller-manager
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-leader-election-role
+  namespace: llama-stack-k8s-operator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - deployments
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods
+  - pods/exec
+  - pods/log
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  - services/finalizers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - '*'
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - deployments/finalizers
+  verbs:
+  - '*'
+- apiGroups:
+  - llamastack.io
+  resources:
+  - llamastackdistributions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - llamastack.io
+  resources:
+  - llamastackdistributions/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - llamastack.io
+  resources:
+  - llamastackdistributions/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-proxy-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-leader-election-rolebinding
+  namespace: llama-stack-k8s-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llama-stack-k8s-operator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: llama-stack-k8s-operator-controller-manager
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llama-stack-k8s-operator-manager-role
+subjects:
+- kind: ServiceAccount
+  name: llama-stack-k8s-operator-controller-manager
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-proxy-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llama-stack-k8s-operator-proxy-role
+subjects:
+- kind: ServiceAccount
+  name: llama-stack-k8s-operator-controller-manager
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: v1
+data:
+  OLLAMA_IMAGE: docker.io/llamastack/distribution-ollama:latest
+  VLLM_IMAGE: docker.io/llamastack/distribution-remote-vllm:latest
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-lls-parameters-544mdk2b4h
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: v1
+data:
+  controller_manager_config.yaml: |
+    apiVersion: controller-runtime.sigs.k8s.io/v1alpha1
+    kind: ControllerManagerConfig
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: 127.0.0.1:8080
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: 54e06e98.llamastack.io
+    # leaderElectionReleaseOnCancel defines if the leader should step down volume
+    # when the Manager ends. This requires the binary to immediately end when the
+    # Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
+    # speeds up voluntary leader transitions as the new leader don't have to wait
+    # LeaseDuration time first.
+    # In the default scaffold provided, the program ends immediately after
+    # the manager stops, so would be fine to enable this option. However,
+    # if you are doing or is intended to do any operation such as perform cleanups
+    # after the manager stops then its usage might be unsafe.
+    # leaderElectionReleaseOnCancel: true
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+  name: llama-stack-k8s-operator-manager-config
+  namespace: llama-stack-k8s-operator-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+    control-plane: controller-manager
+  name: llama-stack-k8s-operator-controller-manager-metrics-service
+  namespace: llama-stack-k8s-operator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: https
+  selector:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: controller-manager
+    app.kubernetes.io/name: llama-stack-k8s-operator
+    control-plane: controller-manager
+  name: llama-stack-k8s-operator-controller-manager
+  namespace: llama-stack-k8s-operator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller-manager
+      app.kubernetes.io/name: llama-stack-k8s-operator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/component: controller-manager
+        app.kubernetes.io/name: llama-stack-k8s-operator
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --leader-elect
+        command:
+        - /manager
+        env:
+        - name: OLLAMA_IMAGE
+          value: docker.io/llamastack/distribution-ollama:latest
+        - name: VLLM_IMAGE
+          value: docker.io/llamastack/distribution-remote-vllm:latest
+        image: quay.io/llamastack/llama-stack-k8s-operator:latest
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: llama-stack-k8s-operator-controller-manager
+      terminationGracePeriodSeconds: 10

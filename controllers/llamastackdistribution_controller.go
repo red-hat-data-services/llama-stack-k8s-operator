@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,9 +28,9 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	llamav1alpha1 "github.com/meta-llama/llama-stack-k8s-operator/api/v1alpha1"
-	"github.com/meta-llama/llama-stack-k8s-operator/pkg/deploy"
-	"github.com/meta-llama/llama-stack-k8s-operator/pkg/featureflags"
+	llamav1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
+	"github.com/llamastack/llama-stack-k8s-operator/pkg/deploy"
+	"github.com/llamastack/llama-stack-k8s-operator/pkg/featureflags"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -46,17 +45,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-const (
-	defaultContainerName   = "llama-stack"
-	defaultPort            = 8321 // Matches the QuickStart guide
-	defaultServicePortName = "http"
-	defaultLabelKey        = "app"
-	defaultLabelValue      = "llama-stack"
-)
-
-// Define a map that translates user-friendly names to actual image references.
-var imageMap = llamav1alpha1.ImageMap
 
 // LlamaStackDistributionReconciler reconciles a LlamaStack object.
 type LlamaStackDistributionReconciler struct {
@@ -79,39 +67,75 @@ func (r *LlamaStackDistributionReconciler) Reconcile(ctx context.Context, req ct
 	r.Log = r.Log.WithValues("llamastack", req.NamespacedName)
 
 	// Fetch the LlamaStack instance
+	instance, err := r.fetchInstance(ctx, req.NamespacedName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Instance not found - skip reconciliation
+	if instance == nil {
+		return ctrl.Result{}, nil
+	}
+
+	// Reconcile all resources
+	if err := r.reconcileResources(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Check if requeue is needed
+	if !instance.Status.Ready {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	r.Log.Info("Successfully reconciled LlamaStackDistribution")
+	return ctrl.Result{}, nil
+}
+
+// fetchInstance retrieves the LlamaStackDistribution instance.
+func (r *LlamaStackDistributionReconciler) fetchInstance(ctx context.Context, namespacedName types.NamespacedName) (*llamav1alpha1.LlamaStackDistribution, error) {
 	instance := &llamav1alpha1.LlamaStackDistribution{}
-	if err := r.Get(ctx, req.NamespacedName, instance); err != nil {
+	if err := r.Get(ctx, namespacedName, instance); err != nil {
 		if k8serrors.IsNotFound(err) {
 			r.Log.Info("failed to find LlamaStackDistribution resource")
-			return ctrl.Result{}, nil
+			return nil, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("failed to fetch LlamaStackDistribution: %w", err)
+		return nil, fmt.Errorf("failed to fetch LlamaStackDistribution: %w", err)
+	}
+	return instance, nil
+}
+
+// reconcileResources reconciles all resources for the LlamaStackDistribution instance.
+func (r *LlamaStackDistributionReconciler) reconcileResources(ctx context.Context, instance *llamav1alpha1.LlamaStackDistribution) error {
+	// Reconcile the PVC if storage is configured
+	if instance.Spec.Server.Storage != nil {
+		if err := r.reconcilePVC(ctx, instance); err != nil {
+			return fmt.Errorf("failed to reconcile PVC: %w", err)
+		}
 	}
 
 	// Reconcile the NetworkPolicy
 	if err := r.reconcileNetworkPolicy(ctx, instance); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile NetworkPolicy: %w", err)
+		return fmt.Errorf("failed to reconcile NetworkPolicy: %w", err)
 	}
 
 	// Reconcile the Deployment
 	if err := r.reconcileDeployment(ctx, instance); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
+		return fmt.Errorf("failed to reconcile Deployment: %w", err)
 	}
 
 	// Reconcile the Service if ports are defined, else use default port
 	if instance.HasPorts() {
 		if err := r.reconcileService(ctx, instance); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to reconcile service: %w", err)
+			return fmt.Errorf("failed to reconcile service: %w", err)
 		}
 	}
 
 	// Update status
 	if err := r.updateStatus(ctx, instance); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update status: %w", err)
+		return fmt.Errorf("failed to update status: %w", err)
 	}
 
-	r.Log.Info("Successfully reconciled LlamaStackDistribution")
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -121,57 +145,74 @@ func (r *LlamaStackDistributionReconciler) SetupWithManager(mgr ctrl.Manager) er
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Complete(r)
+}
+
+// reconcilePVC creates or updates the PVC for the LlamaStack server.
+func (r *LlamaStackDistributionReconciler) reconcilePVC(ctx context.Context, instance *llamav1alpha1.LlamaStackDistribution) error {
+	logger := log.FromContext(ctx)
+
+	// Use default size if none specified
+	size := instance.Spec.Server.Storage.Size
+	if size == nil {
+		size = &llamav1alpha1.DefaultStorageSize
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name + "-pvc",
+			Namespace: instance.Namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: *size,
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(instance, pvc, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference: %w", err)
+	}
+
+	found := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, found)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			logger.Info("Creating PVC", "pvc", pvc.Name)
+			return r.Create(ctx, pvc)
+		}
+		return fmt.Errorf("failed to fetch PVC: %w", err)
+	}
+	// PVCs are immutable after creation, so we don't need to update them
+	return nil
 }
 
 // reconcileDeployment manages the Deployment for the LlamaStack server.
 func (r *LlamaStackDistributionReconciler) reconcileDeployment(ctx context.Context, instance *llamav1alpha1.LlamaStackDistribution) error {
 	logger := log.FromContext(ctx)
 
-	// Validate that only one of name or image is set
-	if instance.Spec.Server.Distribution.Name != "" && instance.Spec.Server.Distribution.Image != "" {
-		return errors.New("only one of distribution.name or distribution.image can be set")
+	// Validate distribution configuration
+	if err := r.validateDistribution(instance); err != nil {
+		return err
 	}
 
-	// Get the image either from the map or direct reference
-	var resolvedImage string
-	switch {
-	case instance.Spec.Server.Distribution.Name != "":
-		resolvedImage = imageMap[instance.Spec.Server.Distribution.Name]
-		if resolvedImage == "" {
-			return fmt.Errorf("failed to validate distribution name: %s", instance.Spec.Server.Distribution.Name)
-		}
-	case instance.Spec.Server.Distribution.Image != "":
-		resolvedImage = instance.Spec.Server.Distribution.Image
-	default:
-		return errors.New("failed to validate distribution: either distribution.name or distribution.image must be set")
+	// Resolve the container image
+	resolvedImage, err := r.resolveImage(instance)
+	if err != nil {
+		return err
 	}
 
-	// Build the container spec
-	container := corev1.Container{
-		Name:      defaultContainerName,
-		Image:     resolvedImage,
-		Resources: instance.Spec.Server.ContainerSpec.Resources,
-		Env:       instance.Spec.Server.ContainerSpec.Env,
-	}
-	if instance.Spec.Server.ContainerSpec.Name != "" {
-		container.Name = instance.Spec.Server.ContainerSpec.Name
-	}
-	if instance.Spec.Server.ContainerSpec.Port != 0 {
-		container.Ports = []corev1.ContainerPort{{ContainerPort: instance.Spec.Server.ContainerSpec.Port}}
-	} else {
-		container.Ports = []corev1.ContainerPort{{ContainerPort: defaultPort}}
-	}
+	// Build container spec
+	container := buildContainerSpec(instance, resolvedImage)
 
-	podSpec := corev1.PodSpec{
-		Containers: []corev1.Container{container},
-	}
-	if instance.Spec.Server.PodOverrides != nil {
-		podSpec.Volumes = instance.Spec.Server.PodOverrides.Volumes
-		container.VolumeMounts = instance.Spec.Server.PodOverrides.VolumeMounts
-		podSpec.Containers[0] = container // Update with volume mounts
-	}
+	// Configure storage
+	podSpec := configurePodStorage(instance, container)
 
+	// Create deployment object
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -180,11 +221,11 @@ func (r *LlamaStackDistributionReconciler) reconcileDeployment(ctx context.Conte
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &instance.Spec.Replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{defaultLabelKey: defaultLabelValue},
+				MatchLabels: map[string]string{llamav1alpha1.DefaultLabelKey: llamav1alpha1.DefaultLabelValue},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{defaultLabelKey: defaultLabelValue},
+					Labels: map[string]string{llamav1alpha1.DefaultLabelKey: llamav1alpha1.DefaultLabelValue},
 				},
 				Spec: podSpec,
 			},
@@ -199,7 +240,7 @@ func (r *LlamaStackDistributionReconciler) reconcileService(ctx context.Context,
 	// Use the container's port (defaulted to 8321 if unset)
 	port := instance.Spec.Server.ContainerSpec.Port
 	if port == 0 {
-		port = defaultPort
+		port = llamav1alpha1.DefaultServerPort
 	}
 
 	service := &corev1.Service{
@@ -208,9 +249,9 @@ func (r *LlamaStackDistributionReconciler) reconcileService(ctx context.Context,
 			Namespace: instance.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{defaultLabelKey: defaultLabelValue},
+			Selector: map[string]string{llamav1alpha1.DefaultLabelKey: llamav1alpha1.DefaultLabelValue},
 			Ports: []corev1.ServicePort{{
-				Name: defaultServicePortName,
+				Name: llamav1alpha1.DefaultServicePortName,
 				Port: port,
 				TargetPort: intstr.IntOrString{
 					IntVal: port,
@@ -228,7 +269,7 @@ func (r *LlamaStackDistributionReconciler) getServerURL(instance *llamav1alpha1.
 	serviceName := fmt.Sprintf("%s-service", instance.Name)
 	port := instance.Spec.Server.ContainerSpec.Port
 	if port == 0 {
-		port = defaultPort
+		port = llamav1alpha1.DefaultServerPort
 	}
 
 	return &url.URL{
@@ -371,6 +412,7 @@ func (r *LlamaStackDistributionReconciler) updateStatus(ctx context.Context, ins
 	if err := r.Status().Update(ctx, instance); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
+
 	return nil
 }
 
@@ -391,7 +433,7 @@ func (r *LlamaStackDistributionReconciler) reconcileNetworkPolicy(ctx context.Co
 	// Use the container's port (defaulted to 8321 if unset)
 	port := instance.Spec.Server.ContainerSpec.Port
 	if port == 0 {
-		port = defaultPort
+		port = llamav1alpha1.DefaultServerPort
 	}
 
 	// get operator namespace
@@ -403,7 +445,7 @@ func (r *LlamaStackDistributionReconciler) reconcileNetworkPolicy(ctx context.Co
 	networkPolicy.Spec = networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				defaultLabelKey: defaultLabelValue,
+				llamav1alpha1.DefaultLabelKey: llamav1alpha1.DefaultLabelValue,
 			},
 		},
 		PolicyTypes: []networkingv1.PolicyType{
@@ -415,7 +457,7 @@ func (r *LlamaStackDistributionReconciler) reconcileNetworkPolicy(ctx context.Co
 					{
 						PodSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{
-								"app.kubernetes.io/part-of": defaultContainerName,
+								"app.kubernetes.io/part-of": llamav1alpha1.DefaultContainerName,
 							},
 						},
 						NamespaceSelector: &metav1.LabelSelector{}, // Empty namespaceSelector to match all namespaces
