@@ -29,7 +29,7 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
 # llamastack.io/llama-stack-k8s-operator-bundle:$VERSION and llamastack.io/llama-stack-k8s-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= quay.io/opendatahub/llama-stack-k8s-operator
+IMAGE_TAG_BASE ?= quay.io/llamastack/llama-stack-k8s-operator
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -303,7 +303,8 @@ api-docs: crd-ref-docs ## Creates API docs using https://github.com/elastic/crd-
 	@# Combined command to remove .io links, ensure a trailing newline, and collapse multiple blank lines.
 	@sed -i.bak -e '/\.io\/[^v][^1].*)/d' -e '/^$$/N;/^\n$$/D' $(API_DOCS_PATH)
 	@# BSD sed doesn't generate trailing newlines, so no need to remove them.
-	@if [ "$(shell uname)" != "Darwin" ]; then \
+	@# BSD sed does not have a '--version' flag, so we need to check for it.
+	@if sed --version >/dev/null 2>&1; then \
 		sed -i.bak -e '$${/^$$/d}' -e '$${N;/^\n$$/d}' $(API_DOCS_PATH); \
 	fi
 	rm -f $(API_DOCS_PATH).bak
