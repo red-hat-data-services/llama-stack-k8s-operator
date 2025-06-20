@@ -30,7 +30,6 @@ func buildContainerSpec(instance *llamav1alpha1.LlamaStackDistribution, image st
 		Name:            llamav1alpha1.DefaultContainerName,
 		Image:           image,
 		Resources:       instance.Spec.Server.ContainerSpec.Resources,
-		Env:             instance.Spec.Server.ContainerSpec.Env,
 		ImagePullPolicy: corev1.PullAlways,
 	}
 
@@ -44,11 +43,25 @@ func buildContainerSpec(instance *llamav1alpha1.LlamaStackDistribution, image st
 	}
 	container.Ports = []corev1.ContainerPort{{ContainerPort: port}}
 
-	// Determine mount path
 	mountPath := llamav1alpha1.DefaultMountPath
-	if instance.Spec.Server.Storage != nil && instance.Spec.Server.Storage.MountPath != "" {
-		mountPath = instance.Spec.Server.Storage.MountPath
+	if instance.Spec.Server.Storage != nil {
+		// Determine mount path
+		if instance.Spec.Server.Storage.MountPath != "" {
+			mountPath = instance.Spec.Server.Storage.MountPath
+		}
 	}
+
+	// Add HF_HOME variable to our mount path so that downloaded models and datasets are stored
+	// on the same volume as the storage. This is not critical but useful if the server is
+	// restarted so the models and datasets are not lost and need to be downloaded again.
+	// For more information, see https://huggingface.co/docs/datasets/en/cache
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name:  "HF_HOME",
+		Value: mountPath,
+	})
+
+	// Finally, add the user provided env vars
+	container.Env = append(container.Env, instance.Spec.Server.ContainerSpec.Env...)
 
 	// Add volume mount for storage
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
@@ -56,6 +69,13 @@ func buildContainerSpec(instance *llamav1alpha1.LlamaStackDistribution, image st
 		MountPath: mountPath,
 	})
 
+	if len(instance.Spec.Server.ContainerSpec.Command) > 0 {
+		container.Command = instance.Spec.Server.ContainerSpec.Command
+	}
+
+	if len(instance.Spec.Server.ContainerSpec.Args) > 0 {
+		container.Args = instance.Spec.Server.ContainerSpec.Args
+	}
 	return container
 }
 
@@ -100,11 +120,10 @@ func configurePodStorage(instance *llamav1alpha1.LlamaStackDistribution, contain
 func (r *LlamaStackDistributionReconciler) validateDistribution(instance *llamav1alpha1.LlamaStackDistribution) error {
 	// If using distribution name, validate it exists in clusterInfo
 	if instance.Spec.Server.Distribution.Name != "" {
-		clusterInfo := r.ClusterInfo
-		if clusterInfo == nil {
+		if r.ClusterInfo == nil {
 			return errors.New("failed to initialize cluster info")
 		}
-		if _, exists := clusterInfo.DistributionImages[instance.Spec.Server.Distribution.Name]; !exists {
+		if _, exists := r.ClusterInfo.DistributionImages[instance.Spec.Server.Distribution.Name]; !exists {
 			return fmt.Errorf("failed to validate distribution: %s. Distribution name not supported", instance.Spec.Server.Distribution.Name)
 		}
 	}

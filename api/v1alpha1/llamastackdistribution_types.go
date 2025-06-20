@@ -22,6 +22,7 @@ package v1alpha1
 //nolint:gci
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -45,7 +46,7 @@ const (
 var DefaultStorageSize = resource.MustParse("10Gi")
 
 // DistributionType defines the distribution configuration for llama-stack.
-// +kubebuilder:validation:XValidation:rule="has(self.name) != has(self.image)",message="Only one of name or image can be specified"
+// +kubebuilder:validation:XValidation:rule="!(has(self.name) && has(self.image))",message="Only one of name or image can be specified"
 type DistributionType struct {
 	// Name is the distribution name that maps to supported distributions.
 	// +optional
@@ -53,6 +54,12 @@ type DistributionType struct {
 	// Image is the direct container image reference to use
 	// +optional
 	Image string `json:"image,omitempty"`
+}
+
+// HealthStatus represents the health status of a provider
+type ProviderHealthStatus struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 // LlamaStackDistributionSpec defines the desired state of LlamaStackDistribution.
@@ -65,7 +72,7 @@ type LlamaStackDistributionSpec struct {
 // ServerSpec defines the desired state of llama server.
 type ServerSpec struct {
 	Distribution  DistributionType `json:"distribution"`
-	ContainerSpec ContainerSpec    `json:"containerSpec"`
+	ContainerSpec ContainerSpec    `json:"containerSpec,omitempty"`
 	PodOverrides  *PodOverrides    `json:"podOverrides,omitempty"` // Optional pod-level overrides
 	// Storage defines the persistent storage configuration
 	// +optional
@@ -87,19 +94,27 @@ type ContainerSpec struct {
 	Port      int32                       `json:"port,omitempty"` // Defaults to 8321 if unset
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	Env       []corev1.EnvVar             `json:"env,omitempty"` // Runtime env vars (e.g., INFERENCE_MODEL)
+	Command   []string                    `json:"command,omitempty"`
+	Args      []string                    `json:"args,omitempty"`
 }
 
 // PodOverrides allows advanced pod-level customization.
 type PodOverrides struct {
-	Volumes      []corev1.Volume      `json:"volumes,omitempty"`
-	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+	// ServiceAccountName allows users to specify their own ServiceAccount
+	// If not specified, the operator will use the default ServiceAccount
+	// +optional
+	ServiceAccountName string               `json:"serviceAccountName,omitempty"`
+	Volumes            []corev1.Volume      `json:"volumes,omitempty"`
+	VolumeMounts       []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 }
 
 // ProviderInfo represents a single provider from the providers endpoint.
 type ProviderInfo struct {
-	API          string `json:"api"`
-	ProviderID   string `json:"provider_id"`
-	ProviderType string `json:"provider_type"`
+	API          string               `json:"api"`
+	ProviderID   string               `json:"provider_id"`
+	ProviderType string               `json:"provider_type"`
+	Config       apiextensionsv1.JSON `json:"config"`
+	Health       ProviderHealthStatus `json:"health"`
 }
 
 // DistributionConfig represents the configuration information from the providers endpoint.
@@ -111,17 +126,54 @@ type DistributionConfig struct {
 	AvailableDistributions map[string]string `json:"availableDistributions,omitempty"`
 }
 
+// LlamaStackDistributionPhase represents the current phase of the LlamaStackDistribution
+// +kubebuilder:validation:Enum=Pending;Initializing;Ready;Failed;Terminating
+type DistributionPhase string
+
+const (
+	// LlamaStackDistributionPhasePending indicates that the distribution is pending initialization
+	LlamaStackDistributionPhasePending DistributionPhase = "Pending"
+	// LlamaStackDistributionPhaseInitializing indicates that the distribution is being initialized
+	LlamaStackDistributionPhaseInitializing DistributionPhase = "Initializing"
+	// LlamaStackDistributionPhaseReady indicates that the distribution is ready to use
+	LlamaStackDistributionPhaseReady DistributionPhase = "Ready"
+	// LlamaStackDistributionPhaseFailed indicates that the distribution has failed
+	LlamaStackDistributionPhaseFailed DistributionPhase = "Failed"
+	// LlamaStackDistributionPhaseTerminating indicates that the distribution is being terminated
+	LlamaStackDistributionPhaseTerminating DistributionPhase = "Terminating"
+)
+
+// VersionInfo contains version-related information
+type VersionInfo struct {
+	// OperatorVersion is the version of the operator managing this distribution
+	OperatorVersion string `json:"operatorVersion,omitempty"`
+	// DeploymentVersion is the version of the LlamaStack deployment
+	LlamaStackVersion string `json:"llamaStackServerVersion,omitempty"`
+	// LastUpdated represents when the version information was last updated
+	LastUpdated metav1.Time `json:"lastUpdated,omitempty"`
+}
+
 // LlamaStackDistributionStatus defines the observed state of LlamaStackDistribution.
 type LlamaStackDistributionStatus struct {
-	Version            string             `json:"version,omitempty"`
+	// Phase represents the current phase of the distribution
+	Phase DistributionPhase `json:"phase,omitempty"`
+	// Version contains version information for both operator and deployment
+	Version VersionInfo `json:"version,omitempty"`
+	// DistributionConfig contains the configuration information from the providers endpoint
 	DistributionConfig DistributionConfig `json:"distributionConfig,omitempty"`
-	Ready              bool               `json:"ready"`
+	// Conditions represent the latest available observations of the distribution's current state
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// AvailableReplicas is the number of available replicas
+	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.version"
-//+kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready"
+//+kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+//+kubebuilder:printcolumn:name="Operator Version",type="string",JSONPath=".status.version.operatorVersion"
+//+kubebuilder:printcolumn:name="Server Version",type="string",JSONPath=".status.version.llamaStackServerVersion"
+//+kubebuilder:printcolumn:name="Available",type="integer",JSONPath=".status.availableReplicas"
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // LlamaStackDistribution is the Schema for the llamastackdistributions API
 
 type LlamaStackDistribution struct {
@@ -147,5 +199,5 @@ func init() { //nolint:gochecknoinits
 
 // HasPorts checks if the container spec defines a port.
 func (r *LlamaStackDistribution) HasPorts() bool {
-	return r.Spec.Server.ContainerSpec.Port != 0 || len(r.Spec.Server.ContainerSpec.Env) > 0 // Port or env implies service need
+	return r.Spec.Server.ContainerSpec.Port != 0 || len(r.Spec.Server.ContainerSpec.Env) > 0
 }
