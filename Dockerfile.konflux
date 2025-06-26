@@ -1,0 +1,37 @@
+# Build the manager binary
+FROM registry.redhat.io/ubi9/go-toolset:1.23@sha256:2a88121395084eaa575e5758b903fffb43dbf9d9586b2878e51678f63235b587 as builder
+
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the go source
+COPY main.go main.go
+COPY api/ api/
+COPY controllers/ controllers/
+COPY pkg/ pkg/
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
+
+# Use distroless as minimal base image to package the manager binary
+FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:e12131db2e2b6572613589a94b7f615d4ac89d94f859dad05908aeb478fb090f
+WORKDIR /
+COPY --from=builder /workspace/manager .
+USER 65532:65532
+
+ENTRYPOINT ["/manager"]
+
+LABEL com.redhat.component="odh-llama-stack-k8s-operator-container" \
+      description="kubernetes operator that is responsible for creating and managing llama-stack server" \
+      summary="kubernetes operator that is responsible for creating and managing llama-stack server" \
+      name="rhoai/odh-llama-stack-k8s-operator-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-llama-stack-k8s-operatorr" \
+      io.k8s.description="odh-llama-stack-k8s-operator" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
