@@ -26,6 +26,13 @@ spec:
     value: quay.io/redhat-user-workloads/rhoai-tenant/odh-llama-stack-k8s-operator:{{revision}}
   - name: dockerfile
     value: Dockerfile.konflux
+  - name: hermetic
+    value: true
+  - name: prefetch-input
+    value: |
+      {"type": "gomod", "path": "."}
+  - name: build-image-index
+    value: true
   pipelineSpec:
     description: |
       This pipeline is ideal for building container images from a Containerfile while maintaining trust after pipeline customization.
