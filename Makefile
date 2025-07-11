@@ -5,6 +5,9 @@
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
 VERSION ?= 0.0.1
 
+# LLAMASTACK_VERSION defines the version of LlamaStack distributions to use
+LLAMASTACK_VERSION ?= latest
+
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
 # To re-generate a bundle for other specific channels without changing the standard setup, you can:
@@ -235,6 +238,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 YQ ?= $(LOCALBIN)/yq
+YAMLFMT ?= $(LOCALBIN)/yamlfmt
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 ## Tool Versions
@@ -243,6 +247,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.17.2
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v1.64.4
 YQ_VERSION ?= v4.45.3
+YAMLFMT_VERSION ?= v0.12.0
 CRD_REF_DOCS_VERSION = v0.1.0
 
 .PHONY: kustomize
@@ -270,6 +275,11 @@ yq: $(YQ) ## Download yq locally if necessary.
 $(YQ): $(LOCALBIN)
 	$(call go-install-tool,$(YQ),github.com/mikefarah/yq/v4,$(YQ_VERSION))
 
+.PHONY: yamlfmt
+yamlfmt: $(YAMLFMT) ## Download yamlfmt locally if necessary.
+$(YAMLFMT): $(LOCALBIN)
+	$(call go-install-tool,$(YAMLFMT),github.com/google/yamlfmt/cmd/yamlfmt,$(YAMLFMT_VERSION))
+
 .PHONY: crd-ref-docs
 crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
 $(CRD_REF_DOCS): $(LOCALBIN)
@@ -289,6 +299,22 @@ GOBIN=$(LOCALBIN) CGO_ENABLED=0 go install -v $${package} ;\
 mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
+endef
+
+# yq-fmt runs yq with the given expression on a file, then formats it with our preferred YAML style
+# $1 - yq expression
+# $2 - target file
+define yq-fmt
+	$(YQ) -i $(1) $(2)
+	$(YAMLFMT) -formatter indentless_arrays=true,retain_line_breaks=true $(2)
+endef
+
+# json-fmt runs yq with the given expression on a JSON file, then formats it nicely
+# $1 - yq expression
+# $2 - target JSON file
+define json-fmt
+	$(YQ) -i $(1) $(2)
+	$(YQ) -i -o json -I 2 '.' $(2)
 endef
 
 .PHONY: operator-sdk
@@ -382,3 +408,29 @@ catalog-push: ## Push a catalog image.
 .PHONY: pre-commit
 pre-commit:
 	pre-commit run --show-diff-on-failure --color=always --all-files
+
+##@ Release
+
+.PHONY: release
+release: yq kustomize yamlfmt ## Prepare release files with VERSION and LLAMASTACK_VERSION
+	@if [ "$(LLAMASTACK_VERSION)" = "latest" ]; then \
+		echo "Error: LLAMASTACK_VERSION must be explicitly set for releases."; \
+		echo "Usage: make release VERSION=0.2.1 LLAMASTACK_VERSION=0.2.12"; \
+		exit 1; \
+	fi
+	@echo "Preparing release with operator version $(VERSION) and LlamaStack version $(LLAMASTACK_VERSION)"
+
+	# Update distributions.json with LlamaStack version and format as pretty JSON
+	$(call json-fmt,'to_entries | map(.value |= sub(":latest"; ":$(LLAMASTACK_VERSION)")) | from_entries',distributions.json)
+
+	# Update kustomization files using Kustomize
+	cd config/manager && $(KUSTOMIZE) edit set image controller=quay.io/llamastack/llama-stack-k8s-operator:v$(VERSION)
+
+	# Update environment variables in manager.yaml and format with our preferred YAML style
+	# using YQ because Kustomize doesn't support setting environment variables
+	$(call yq-fmt,'(select(.kind == "Deployment") | .spec.template.spec.containers[].env[] | select(.name == "OPERATOR_VERSION") | .value) = "$(VERSION)"',config/manager/manager.yaml)
+	$(call yq-fmt,'(select(.kind == "Deployment") | .spec.template.spec.containers[].env[] | select(.name == "LLAMA_STACK_VERSION") | .value) = "$(LLAMASTACK_VERSION)"',config/manager/manager.yaml)
+
+	# Generate manifests and build installer
+	$(MAKE) manifests generate
+	$(MAKE) -e IMG=quay.io/llamastack/llama-stack-k8s-operator:v$(VERSION) build-installer
