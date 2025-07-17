@@ -19,12 +19,13 @@ COPY main.go main.go
 COPY api/ api/
 COPY controllers/ controllers/
 COPY pkg/ pkg/
+COPY distributions.json distributions.json
 
 # Build the manager binary
 USER root
 
 # GOARCH is intentionally left empty to automatically detect the host architecture
-# This ensures the binary matches the platform where docker-build is executed
+# This ensures the binary matches the platform where image-build is executed
 RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o manager main.go
 
 # Use distroless as minimal base image to package the manager binary
@@ -32,6 +33,7 @@ RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/controllers/manifests ./manifests/
 USER 1001
 
 ENTRYPOINT ["/manager"]

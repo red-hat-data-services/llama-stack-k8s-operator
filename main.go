@@ -37,10 +37,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	_ "embed"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
+
+//go:embed distributions.json
+var embeddedDistributions []byte
 
 var (
 	scheme   = runtime.NewScheme()
@@ -59,7 +63,7 @@ func setupReconciler(ctx context.Context, cli client.Client, mgr ctrl.Manager, c
 	if err != nil {
 		return fmt.Errorf("failed to create reconciler: %w", err)
 	}
-	if err = reconciler.SetupWithManager(mgr); err != nil {
+	if err = reconciler.SetupWithManager(ctx, mgr); err != nil {
 		return fmt.Errorf("failed to create controller: %w", err)
 	}
 	return nil
@@ -128,13 +132,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	setupClient, err := client.New(cfg, client.Options{
+		Scheme: scheme,
+	})
 	if err != nil {
 		setupLog.Error(err, "failed to set up clients")
 		os.Exit(1)
 	}
 
-	clusterInfo, err := cluster.NewClusterInfo(ctx, setupClient)
+	clusterInfo, err := cluster.NewClusterInfo(ctx, setupClient, embeddedDistributions)
 	if err != nil {
 		setupLog.Error(err, "failed to initialize cluster config")
 		os.Exit(1)
