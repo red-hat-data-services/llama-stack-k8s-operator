@@ -5,6 +5,9 @@
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
 VERSION ?= 0.0.1
 
+# LLAMASTACK_VERSION defines the version of LlamaStack distributions to use
+LLAMASTACK_VERSION ?= latest
+
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
 # To re-generate a bundle for other specific channels without changing the standard setup, you can:
@@ -53,7 +56,8 @@ OPERATOR_SDK_VERSION ?= v1.39.2
 ENVTEST_K8S_VERSION = 1.31.0
 
 # Image URL to use all building/pushing image targets
-IMG ?= quay.io/llamastack/llama-stack-k8s-operator:latest
+IMG_TAG ?= latest
+IMG ?= $(IMAGE_TAG_BASE):$(IMG_TAG)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -63,7 +67,7 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
+# Be aware that the target commands are only tested with Docker/Podman which is
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= podman
@@ -76,6 +80,13 @@ SHELL = /usr/bin/env bash -o pipefail
 # E2E tests additional flags
 # See README.md, default go test timeout 10m
 E2E_TEST_FLAGS = -timeout 30m
+
+# Test configuration
+TEST_PKGS ?= $$(go list ./... | grep -v /e2e)
+TEST_FLAGS ?= -coverprofile cover.out
+
+# Include local.mk if it exists (for custom overrides)
+-include local.mk
 
 .PHONY: all
 all: build
@@ -108,24 +119,33 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 GOLANGCI_TMP_FILE = .golangci.mktmp.yml
+
 .PHONY: fmt
 fmt: golangci-lint yq ## Formats code and imports.
 	go fmt ./...
 	$(YQ) e '.linters = {"disable-all": true, "enable": ["gci"]}' .golangci.yml  > $(GOLANGCI_TMP_FILE)
 	$(GOLANGCI_LINT) run --config=$(GOLANGCI_TMP_FILE) --fix
-CLEANFILES += $(GOLANGCI_TMP_FILE)
+
+.PHONY: clean
+clean: ## Remove temporary files, caches, and downloaded tools
+	@# Clean golangci-lint cache only if golangci-lint is available
+	@if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
+		$(GOLANGCI_LINT) cache clean; \
+	fi
+	rm -f $(GOLANGCI_TMP_FILE) Dockerfile.cross cover.out
+	rm -rf $(LOCALBIN)
 
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+test: manifests generate fmt vet envtest ## Run tests. Use TEST_PKGS and TEST_FLAGS to customize.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $(TEST_PKGS) $(TEST_FLAGS)
 
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests
-	./hack/deploy-ollama.sh # Deploy Ollama
+	./hack/deploy-quickstart.sh # Deploy Ollama for e2e tests
 	go test -v ./tests/e2e/ -run ^TestE2E -v ${E2E_TEST_FLAGS}
 
 GOLANGCI_LINT_TIMEOUT ?= 5m0s
@@ -150,12 +170,12 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-.PHONY: docker-build
-docker-build: ## Build docker image with the manager.
+.PHONY: image-build
+image-build: ## Build image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
-.PHONY: docker-push
-docker-push: ## Push docker image with the manager.
+.PHONY: image-push
+image-push: ## Push image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
@@ -183,7 +203,7 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	$(KUSTOMIZE) build config/default > release/operator.yaml
 
 .PHONY: image
-image: docker-build docker-push ## Build and push image with the manager.
+image: image-build image-push ## Build and push image with the manager.
 
 ##@ Deployment
 
@@ -222,6 +242,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 YQ ?= $(LOCALBIN)/yq
+YAMLFMT ?= $(LOCALBIN)/yamlfmt
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 ## Tool Versions
@@ -230,6 +251,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.17.2
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v1.64.4
 YQ_VERSION ?= v4.45.3
+YAMLFMT_VERSION ?= v0.12.0
 CRD_REF_DOCS_VERSION = v0.1.0
 
 .PHONY: kustomize
@@ -257,6 +279,11 @@ yq: $(YQ) ## Download yq locally if necessary.
 $(YQ): $(LOCALBIN)
 	$(call go-install-tool,$(YQ),github.com/mikefarah/yq/v4,$(YQ_VERSION))
 
+.PHONY: yamlfmt
+yamlfmt: $(YAMLFMT) ## Download yamlfmt locally if necessary.
+$(YAMLFMT): $(LOCALBIN)
+	$(call go-install-tool,$(YAMLFMT),github.com/google/yamlfmt/cmd/yamlfmt,$(YAMLFMT_VERSION))
+
 .PHONY: crd-ref-docs
 crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
 $(CRD_REF_DOCS): $(LOCALBIN)
@@ -276,6 +303,22 @@ GOBIN=$(LOCALBIN) CGO_ENABLED=0 go install -v $${package} ;\
 mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
+endef
+
+# yq-fmt runs yq with the given expression on a file, then formats it with our preferred YAML style
+# $1 - yq expression
+# $2 - target file
+define yq-fmt
+	$(YQ) -i $(1) $(2)
+	$(YAMLFMT) -formatter indentless_arrays=true,retain_line_breaks=true $(2)
+endef
+
+# json-fmt runs yq with the given expression on a JSON file, then formats it nicely
+# $1 - yq expression
+# $2 - target JSON file
+define json-fmt
+	$(YQ) -i $(1) $(2)
+	$(YQ) -i -o json -I 2 '.' $(2)
 endef
 
 .PHONY: operator-sdk
@@ -322,7 +365,7 @@ bundle-build: ## Build the bundle image.
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
-	$(MAKE) docker-push IMG=$(BUNDLE_IMG)
+	$(MAKE) image-push IMG=$(BUNDLE_IMG)
 
 .PHONY: opm
 OPM = $(LOCALBIN)/opm
@@ -358,14 +401,40 @@ endif
 # https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
-	$(OPM) index add --container-tool docker --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
+	$(OPM) index add --container-tool $(CONTAINER_TOOL) --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
 
 # Push the catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
-	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+	$(MAKE) image-push IMG=$(CATALOG_IMG)
 
 # Pre-commit checks called explicitly
 .PHONY: pre-commit
 pre-commit:
 	pre-commit run --show-diff-on-failure --color=always --all-files
+
+##@ Release
+
+.PHONY: release
+release: yq kustomize yamlfmt ## Prepare release files with VERSION and LLAMASTACK_VERSION
+	@if [ "$(LLAMASTACK_VERSION)" = "latest" ]; then \
+		echo "Error: LLAMASTACK_VERSION must be explicitly set for releases."; \
+		echo "Usage: make release VERSION=0.2.1 LLAMASTACK_VERSION=0.2.12"; \
+		exit 1; \
+	fi
+	@echo "Preparing release with operator version $(VERSION) and LlamaStack version $(LLAMASTACK_VERSION)"
+
+	# Update distributions.json with LlamaStack version and format as pretty JSON
+	$(call json-fmt,'to_entries | map(.value |= sub(":latest"; ":$(LLAMASTACK_VERSION)")) | from_entries',distributions.json)
+
+	# Update kustomization files using Kustomize
+	cd config/manager && $(KUSTOMIZE) edit set image controller=quay.io/llamastack/llama-stack-k8s-operator:v$(VERSION)
+
+	# Update environment variables in manager.yaml and format with our preferred YAML style
+	# using YQ because Kustomize doesn't support setting environment variables
+	$(call yq-fmt,'(select(.kind == "Deployment") | .spec.template.spec.containers[].env[] | select(.name == "OPERATOR_VERSION") | .value) = "$(VERSION)"',config/manager/manager.yaml)
+	$(call yq-fmt,'(select(.kind == "Deployment") | .spec.template.spec.containers[].env[] | select(.name == "LLAMA_STACK_VERSION") | .value) = "$(LLAMASTACK_VERSION)"',config/manager/manager.yaml)
+
+	# Generate manifests and build installer
+	$(MAKE) manifests generate
+	$(MAKE) -e IMG=quay.io/llamastack/llama-stack-k8s-operator:v$(VERSION) build-installer
