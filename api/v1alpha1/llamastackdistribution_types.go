@@ -39,7 +39,7 @@ const (
 	// DefaultLabelValue is the default value for labels
 	DefaultLabelValue = "llama-stack"
 	// DefaultMountPath is the default mount path for storage
-	DefaultMountPath = "/.llama"
+	DefaultMountPath = "/opt/app-root/src/.llama/distributions/rh/"
 	// LlamaStackDistributionKind is the kind name for LlamaStackDistribution resources
 	LlamaStackDistributionKind = "LlamaStackDistribution"
 )
