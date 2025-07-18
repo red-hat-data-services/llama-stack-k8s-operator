@@ -19,7 +19,7 @@ COPY main.go main.go
 COPY api/ api/
 COPY controllers/ controllers/
 COPY pkg/ pkg/
-COPY config/overlays/odh/distributions.json distributions.json
+COPY distributions.json distributions.json
 
 # Build the manager binary
 USER root
