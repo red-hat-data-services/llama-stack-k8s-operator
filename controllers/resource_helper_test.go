@@ -55,7 +55,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: "/opt/app-root/src/.llama/distributions/rh/"},
 				},
 			},
 		},
@@ -129,7 +129,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: "/opt/app-root/src/.llama/distributions/rh/"},
 				},
 			},
 		},

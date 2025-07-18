@@ -288,11 +288,11 @@ func (r *LlamaStackDistributionReconciler) createConfigMapFieldIndexer(ctx conte
 		r.configMapIndexFunc,
 	); err != nil {
 		// Log warning but don't fail startup - older Kubernetes versions may not support this
-		mgr.GetLogger().Info("Field indexer for ConfigMap references not supported, will use manual search fallback",
+		mgr.GetLogger().V(1).Info("Field indexer for ConfigMap references not supported, will use manual search fallback",
 			"error", err.Error())
 		return nil
 	}
-	mgr.GetLogger().Info("Successfully created field indexer for ConfigMap references - will use efficient lookups")
+	mgr.GetLogger().V(1).Info("Successfully created field indexer for ConfigMap references - will use efficient lookups")
 	return nil
 }
 
@@ -445,7 +445,7 @@ func (r *LlamaStackDistributionReconciler) isConfigMapReferenced(configMap clien
 	if err != nil {
 		// Field indexer failed (likely due to older Kubernetes version not supporting custom field labels)
 		// Fall back to a manual check instead of assuming all ConfigMaps are referenced
-		logger.Info("Field indexer not supported, falling back to manual ConfigMap reference check", "error", err.Error())
+		logger.V(1).Info("Field indexer not supported, falling back to manual ConfigMap reference check", "error", err.Error())
 		return r.manuallyCheckConfigMapReference(configMap)
 	}
 
@@ -519,7 +519,7 @@ func (r *LlamaStackDistributionReconciler) tryFieldIndexerLookup(ctx context.Con
 	attachedLlamaStacks := llamav1alpha1.LlamaStackDistributionList{}
 	err := r.List(ctx, &attachedLlamaStacks, client.MatchingFields{"spec.server.userConfig.configMapName": indexKey})
 	if err != nil {
-		logger.Info("Field indexer not supported, will fall back to a manual search for ConfigMap event processing",
+		logger.V(1).Info("Field indexer not supported, will fall back to a manual search for ConfigMap event processing",
 			"indexKey", indexKey, "error", err.Error())
 		return attachedLlamaStacks, false
 	}
@@ -758,6 +758,44 @@ func (r *LlamaStackDistributionReconciler) getProviderInfo(ctx context.Context, 
 	return response.Data, nil
 }
 
+// getVersionInfo makes an HTTP request to the version endpoint.
+func (r *LlamaStackDistributionReconciler) getVersionInfo(ctx context.Context, instance *llamav1alpha1.LlamaStackDistribution) (string, error) {
+	u := r.getServerURL(instance, "/v1/version")
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create version request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to make version request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to query version endpoint: returned status code %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read version response: %w", err)
+	}
+
+	var response struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("failed to unmarshal version response: %w", err)
+	}
+
+	return response.Version, nil
+}
+
 // updateStatus refreshes the LlamaStack status.
 func (r *LlamaStackDistributionReconciler) updateStatus(ctx context.Context, instance *llamav1alpha1.LlamaStackDistribution, reconcileErr error) error {
 	// Initialize OperatorVersion if not set
@@ -826,9 +864,6 @@ func (r *LlamaStackDistributionReconciler) updateDeploymentStatus(ctx context.Co
 		instance.Status.Phase = llamav1alpha1.LlamaStackDistributionPhaseReady
 		deploymentReady = true
 		SetDeploymentReadyCondition(&instance.Status, true, MessageDeploymentReady)
-		if instance.Status.Version.LlamaStackVersion == "" {
-			instance.Status.Version.LlamaStackVersion = os.Getenv("LLAMA_STACK_VERSION")
-		}
 	}
 	instance.Status.AvailableReplicas = deployment.Status.ReadyReplicas
 	return deploymentReady, nil
@@ -903,6 +938,16 @@ func (r *LlamaStackDistributionReconciler) performHealthChecks(ctx context.Conte
 		instance.Status.DistributionConfig.Providers = nil
 	} else {
 		instance.Status.DistributionConfig.Providers = providers
+	}
+
+	// Get version information from the API endpoint
+	version, err := r.getVersionInfo(ctx, instance)
+	if err != nil {
+		logger.Error(err, "failed to get version info from API endpoint")
+		// Don't clear the version if we cant fetch it - keep the existing one
+	} else {
+		instance.Status.Version.LlamaStackServerVersion = version
+		logger.V(1).Info("Updated LlamaStack version from API endpoint", "version", version)
 	}
 }
 
