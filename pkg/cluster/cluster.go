@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/llamastack/llama-stack-k8s-operator/pkg/deploy"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,8 +23,14 @@ func NewClusterInfo(ctx context.Context, client client.Client, embeddedDistribut
 	}
 
 	var distributionImages map[string]string
-	if err := json.Unmarshal(embeddedDistributions, &distributionImages); err != nil {
-		return nil, fmt.Errorf("failed to parse embedded distributions JSON: %w", err)
+	if os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION") != "" {
+		distributionImages = map[string]string{
+			"rh-dev": os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION"),
+		}
+	} else {
+		if err := json.Unmarshal(embeddedDistributions, &distributionImages); err != nil {
+			return nil, fmt.Errorf("failed to parse embedded distributions JSON: %w", err)
+		}
 	}
 
 	return &ClusterInfo{

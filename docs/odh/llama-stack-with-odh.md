@@ -115,6 +115,7 @@ spec:
       name: 'rh-dev'
     storage:
       size: 20Gi
+      mountPath: <custom-mount-path> ## Defaults to /opt/app-root/src/.llama/distributions/rh/
 ```
 
 ### 4. Verify LlamaStack Deployment

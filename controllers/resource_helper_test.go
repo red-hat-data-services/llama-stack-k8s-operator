@@ -55,7 +55,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: "/opt/app-root/src/.llama/distributions/rh/"},
 				},
 			},
 		},
@@ -129,7 +129,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: "/opt/app-root/src/.llama/distributions/rh/"},
 				},
 			},
 		},
@@ -561,8 +561,8 @@ func TestPodOverridesWithoutServiceAccount(t *testing.T) {
 	// Apply pod overrides
 	configurePodOverrides(instance, &deployment.Spec.Template.Spec)
 
-	// Verify ServiceAccount name is empty
-	if deployment.Spec.Template.Spec.ServiceAccountName != "" {
-		t.Errorf("expected empty ServiceAccountName, got %s", deployment.Spec.Template.Spec.ServiceAccountName)
+	// Verify ServiceAccount name is empty (default ServiceAccountName should be set when not explicitly provided)
+	if deployment.Spec.Template.Spec.ServiceAccountName != instance.Name+"-sa" {
+		t.Errorf("expected default ServiceAccountName when not explicitly provided, got %s", deployment.Spec.Template.Spec.ServiceAccountName)
 	}
 }
