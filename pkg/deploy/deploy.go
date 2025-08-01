@@ -35,7 +35,7 @@ func ApplyDeployment(ctx context.Context, cli client.Client, scheme *runtime.Sch
 	if !reflect.DeepEqual(found.Spec, deployment.Spec) {
 		logger.Info("Updating Deployment", "deployment", deployment.Name)
 
-		// Preserve the existing selector to avoid immutable field error
+		// Preserve the existing selector to avoid immutable field error during upgrades
 		deployment.Spec.Selector = found.Spec.Selector
 
 		// Use server-side apply to merge changes properly
