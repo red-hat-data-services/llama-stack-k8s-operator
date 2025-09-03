@@ -159,9 +159,9 @@ func TestBuildContainerSpec(t *testing.T) {
 				Image:           "test-image:latest",
 				ImagePullPolicy: corev1.PullAlways,
 				Ports:           []corev1.ContainerPort{{ContainerPort: llamav1alpha1.DefaultServerPort}},
-				StartupProbe:    newDefaultStartupProbe(llamav1alpha1.DefaultServerPort),
-				Command:         []string{"python", "-m", "llama_stack.distribution.server.server"},
-				Args:            []string{"--config", "/etc/llama-stack/run.yaml"},
+				ReadinessProbe:  newDefaultStartupProbe(llamav1alpha1.DefaultServerPort),
+				Command:         []string{"/bin/sh", "-c", startupScript},
+				Args:            []string{},
 				Env: []corev1.EnvVar{
 					{Name: "HF_HOME", Value: llamav1alpha1.DefaultMountPath},
 				},
