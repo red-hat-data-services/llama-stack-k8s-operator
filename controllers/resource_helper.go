@@ -124,12 +124,11 @@ func getStartupProbe(instance *llamav1alpha1.LlamaStackDistribution) *corev1.Pro
 // buildContainerSpec creates the container specification.
 func buildContainerSpec(ctx context.Context, r *LlamaStackDistributionReconciler, instance *llamav1alpha1.LlamaStackDistribution, image string) corev1.Container {
 	container := corev1.Container{
-		Name:            getContainerName(instance),
-		Image:           image,
-		Resources:       instance.Spec.Server.ContainerSpec.Resources,
-		ImagePullPolicy: corev1.PullAlways,
-		Ports:           []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}},
-		StartupProbe:    getStartupProbe(instance),
+		Name:         getContainerName(instance),
+		Image:        image,
+		Resources:    instance.Spec.Server.ContainerSpec.Resources,
+		Ports:        []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}},
+		StartupProbe: getStartupProbe(instance),
 	}
 
 	// Configure environment variables and mounts
