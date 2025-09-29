@@ -46,4 +46,5 @@ LABEL com.redhat.component="odh-llama-stack-k8s-operator-container" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-llama-stack-k8s-operator" \
       io.k8s.description="odh-llama-stack-k8s-operator" \
-      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf" \
+      cpe="cpe:/a:redhat:openshift_ai:2.23::el9"
