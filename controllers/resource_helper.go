@@ -37,18 +37,46 @@ const (
 	maxConfigMapKeyLength = 253
 )
 
-// Readiness probe configuration.
+// Probes configuration.
 const (
-	readinessProbeInitialDelaySeconds = 15 // Time to wait before the first probe
-	readinessProbePeriodSeconds       = 10 // How often to probe
-	readinessProbeTimeoutSeconds      = 5  // When the probe times out
-	readinessProbeFailureThreshold    = 3  // Pod is marked Unhealthy after 3 consecutive failures
-	readinessProbeSuccessThreshold    = 1  // Pod is marked Ready after 1 successful probe
+	startupProbeInitialDelaySeconds = 15 // Time to wait before the first probe
+	startupProbeTimeoutSeconds      = 30 // When the probe times out
+	startupProbeFailureThreshold    = 3  // Pod is marked Unhealthy after 3 consecutive failures
+	startupProbeSuccessThreshold    = 1  // Pod is marked Ready after 1 successful probe
 )
 
 // validConfigMapKeyRegex defines allowed characters for ConfigMap keys.
 // Kubernetes ConfigMap keys must be valid DNS subdomain names or data keys.
 var validConfigMapKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-_.]*[a-zA-Z0-9])?$`)
+
+// startupScript is the script that will be used to start the server.
+var startupScript = `
+set -e
+
+    if python -c "
+import sys
+
+try:
+    from importlib.metadata import version
+    from packaging import version as pkg_version
+
+    llama_version = version('llama_stack')
+    print(f'Determined llama-stack version {llama_version}')
+    if pkg_version.parse(llama_version) < pkg_version.parse('0.2.17'):
+        print('llama-stack version is less than 0.2.17 usin old module path llama_stack.distribution.server.server to start the server')
+        sys.exit(0)
+    else:
+        print('llama-stack version is greater than or equal to 0.2.17 using new module path llama_stack.core.server.server to start the server')
+        sys.exit(1)
+except Exception as e:
+    print(f'Failed to determine version: assume newer version if we cannot determine using new module path llama_stack.core.server.server to start the server: {e}')
+    sys.exit(1)
+
+"; then
+    python3 -m llama_stack.distribution.server.server --config /etc/llama-stack/run.yaml
+else
+    python3 -m llama_stack.core.server.server /etc/llama-stack/run.yaml
+fi`
 
 // validateConfigMapKeys validates that all ConfigMap keys contain only safe characters.
 // Note: This function validates key names only. PEM content validation is performed
@@ -72,27 +100,35 @@ func validateConfigMapKeys(keys []string) error {
 	return nil
 }
 
+// getHealthProbe returns the health probe handler for the container.
+func getHealthProbe(instance *llamav1alpha1.LlamaStackDistribution) corev1.ProbeHandler {
+	return corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/v1/health",
+			Port: intstr.FromInt(int(getContainerPort(instance))),
+		},
+	}
+}
+
+// getStartupProbe returns the startup probe for the container.
+func getStartupProbe(instance *llamav1alpha1.LlamaStackDistribution) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:        getHealthProbe(instance),
+		InitialDelaySeconds: startupProbeInitialDelaySeconds,
+		TimeoutSeconds:      startupProbeTimeoutSeconds,
+		FailureThreshold:    startupProbeFailureThreshold,
+		SuccessThreshold:    startupProbeSuccessThreshold,
+	}
+}
+
 // buildContainerSpec creates the container specification.
 func buildContainerSpec(ctx context.Context, r *LlamaStackDistributionReconciler, instance *llamav1alpha1.LlamaStackDistribution, image string) corev1.Container {
 	container := corev1.Container{
-		Name:            getContainerName(instance),
-		Image:           image,
-		Resources:       instance.Spec.Server.ContainerSpec.Resources,
-		ImagePullPolicy: corev1.PullAlways,
-		Ports:           []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}},
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/v1/health",
-					Port: intstr.FromInt(int(getContainerPort(instance))),
-				},
-			},
-			InitialDelaySeconds: readinessProbeInitialDelaySeconds,
-			PeriodSeconds:       readinessProbePeriodSeconds,
-			TimeoutSeconds:      readinessProbeTimeoutSeconds,
-			FailureThreshold:    readinessProbeFailureThreshold,
-			SuccessThreshold:    readinessProbeSuccessThreshold,
-		},
+		Name:         getContainerName(instance),
+		Image:        image,
+		Resources:    instance.Spec.Server.ContainerSpec.Resources,
+		Ports:        []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}},
+		StartupProbe: getStartupProbe(instance),
 	}
 
 	// Configure environment variables and mounts
@@ -170,8 +206,12 @@ func configureContainerMounts(ctx context.Context, r *LlamaStackDistributionReco
 func configureContainerCommands(instance *llamav1alpha1.LlamaStackDistribution, container *corev1.Container) {
 	// Override the container entrypoint to use the custom config file if user config is specified
 	if instance.Spec.Server.UserConfig != nil && instance.Spec.Server.UserConfig.ConfigMapName != "" {
-		container.Command = []string{"python", "-m", "llama_stack.distribution.server.server"}
-		container.Args = []string{"--config", "/etc/llama-stack/run.yaml"}
+		// Override the container entrypoint to use the custom config file instead of the default
+		// template. The script will determine the llama-stack version and use the appropriate module
+		// path to start the server.
+
+		container.Command = []string{"/bin/sh", "-c", startupScript}
+		container.Args = []string{}
 	}
 
 	// Apply user-specified command and args (takes precedence)
@@ -324,8 +364,8 @@ done`, CABundleTempPath, CABundleSourceDir, fileList)
 			},
 		},
 		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: &[]bool{false}[0],
-			RunAsNonRoot:             &[]bool{false}[0],
+			AllowPrivilegeEscalation: ptr.To(false),
+			RunAsNonRoot:             ptr.To(false),
 			Capabilities: &corev1.Capabilities{
 				Drop: []corev1.Capability{"ALL"},
 			},
@@ -404,8 +444,12 @@ func configurePersistentStorage(instance *llamav1alpha1.LlamaStackDistribution, 
 			},
 		},
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  ptr.To(int64(0)), // Run as root to be able to change ownership
-			RunAsGroup: ptr.To(int64(0)),
+			RunAsUser:                ptr.To(int64(0)), // Run as root to be able to change ownership
+			RunAsGroup:               ptr.To(int64(0)),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
 	}
 
@@ -557,6 +601,16 @@ func configurePodOverrides(instance *llamav1alpha1.LlamaStackDistribution, podSp
 		podSpec.ServiceAccountName = instance.Spec.Server.PodOverrides.ServiceAccountName
 	} else {
 		podSpec.ServiceAccountName = instance.Name + "-sa"
+	}
+
+	// Configure pod-level security context for OpenShift SCC compatibility
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Set fsGroup to allow write access to mounted volumes
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(0))
 	}
 
 	// Apply other pod overrides if specified
