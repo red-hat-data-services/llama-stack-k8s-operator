@@ -348,10 +348,9 @@ for key in %s; do
 done`, CABundleTempPath, CABundleSourceDir, fileList)
 
 	return corev1.Container{
-		Name:            CABundleInitName,
-		Image:           image,
-		ImagePullPolicy: corev1.PullAlways,
-		Command:         []string{"/bin/sh", "-c", script},
+		Name:    CABundleInitName,
+		Image:   image,
+		Command: []string{"/bin/sh", "-c", script},
 		// No Args needed since we embed the file list in the script
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -430,9 +429,8 @@ func configurePersistentStorage(instance *llamav1alpha1.LlamaStackDistribution, 
 	command := strings.Join(commands, " && ")
 
 	initContainer := corev1.Container{
-		Name:            "update-pvc-permissions",
-		Image:           image,
-		ImagePullPolicy: corev1.PullAlways,
+		Name:  "update-pvc-permissions",
+		Image: image,
 		Command: []string{
 			"/bin/sh",
 			"-c",
