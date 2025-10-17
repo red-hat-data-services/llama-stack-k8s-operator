@@ -53,30 +53,39 @@ var validConfigMapKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-_.]*[a
 var startupScript = `
 set -e
 
-    if python -c "
+# Determine which CLI to use based on llama-stack version
+VERSION_CODE=$(python -c "
 import sys
+from importlib.metadata import version
+from packaging import version as pkg_version
 
 try:
-    from importlib.metadata import version
-    from packaging import version as pkg_version
-
     llama_version = version('llama_stack')
-    print(f'Determined llama-stack version {llama_version}')
-    if pkg_version.parse(llama_version) < pkg_version.parse('0.2.17'):
-        print('llama-stack version is less than 0.2.17 usin old module path llama_stack.distribution.server.server to start the server')
-        sys.exit(0)
-    else:
-        print('llama-stack version is greater than or equal to 0.2.17 using new module path llama_stack.core.server.server to start the server')
-        sys.exit(1)
-except Exception as e:
-    print(f'Failed to determine version: assume newer version if we cannot determine using new module path llama_stack.core.server.server to start the server: {e}')
-    sys.exit(1)
+    print(f'Detected llama-stack version: {llama_version}', file=sys.stderr)
 
-"; then
-    python3 -m llama_stack.distribution.server.server --config /etc/llama-stack/run.yaml
-else
-    python3 -m llama_stack.core.server.server /etc/llama-stack/run.yaml
-fi`
+    v = pkg_version.parse(llama_version)
+
+    if v < pkg_version.parse('0.2.17'):
+        print('Using legacy module path (llama_stack.distribution.server.server)', file=sys.stderr)
+        print(0)
+    elif v < pkg_version.parse('0.3.0'):
+        print('Using core module path (llama_stack.core.server.server)', file=sys.stderr)
+        print(1)
+    else:
+        print('Using new CLI command (llama stack run)', file=sys.stderr)
+        print(2)
+except Exception as e:
+    print(f'Version detection failed, defaulting to new CLI: {e}', file=sys.stderr)
+    print(2)
+")
+
+# Execute the appropriate CLI based on version
+case $VERSION_CODE in
+    0) python3 -m llama_stack.distribution.server.server --config /etc/llama-stack/run.yaml ;;
+    1) python3 -m llama_stack.core.server.server /etc/llama-stack/run.yaml ;;
+    2) llama stack run /etc/llama-stack/run.yaml ;;
+    *) echo "Invalid version code: $VERSION_CODE, using new CLI"; llama stack run /etc/llama-stack/run.yaml ;;
+esac`
 
 // validateConfigMapKeys validates that all ConfigMap keys contain only safe characters.
 // Note: This function validates key names only. PEM content validation is performed
@@ -365,7 +374,7 @@ done`, CABundleTempPath, CABundleSourceDir, fileList)
 		},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
-			RunAsNonRoot:             ptr.To(false),
+			RunAsNonRoot:             ptr.To(true),
 			Capabilities: &corev1.Capabilities{
 				Drop: []corev1.Capability{"ALL"},
 			},
@@ -380,7 +389,7 @@ func configurePodStorage(ctx context.Context, r *LlamaStackDistributionReconcile
 	}
 
 	// Configure storage volumes and init containers
-	configureStorage(instance, &podSpec, container.Image)
+	configureStorage(instance, &podSpec)
 
 	// Configure TLS CA bundle (with auto-detection support)
 	configureTLSCABundle(ctx, r, instance, &podSpec, container.Image)
@@ -395,16 +404,16 @@ func configurePodStorage(ctx context.Context, r *LlamaStackDistributionReconcile
 }
 
 // configureStorage handles storage volume configuration.
-func configureStorage(instance *llamav1alpha1.LlamaStackDistribution, podSpec *corev1.PodSpec, image string) {
+func configureStorage(instance *llamav1alpha1.LlamaStackDistribution, podSpec *corev1.PodSpec) {
 	if instance.Spec.Server.Storage != nil {
-		configurePersistentStorage(instance, podSpec, image)
+		configurePersistentStorage(instance, podSpec)
 	} else {
 		configureEmptyDirStorage(podSpec)
 	}
 }
 
 // configurePersistentStorage sets up PVC-based storage with init container for permissions.
-func configurePersistentStorage(instance *llamav1alpha1.LlamaStackDistribution, podSpec *corev1.PodSpec, image string) {
+func configurePersistentStorage(instance *llamav1alpha1.LlamaStackDistribution, podSpec *corev1.PodSpec) {
 	// Use PVC for persistent storage
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: "lls-storage",
@@ -414,46 +423,6 @@ func configurePersistentStorage(instance *llamav1alpha1.LlamaStackDistribution, 
 			},
 		},
 	})
-
-	// Add init container to fix permissions on the PVC mount.
-	mountPath := llamav1alpha1.DefaultMountPath
-	if instance.Spec.Server.Storage.MountPath != "" {
-		mountPath = instance.Spec.Server.Storage.MountPath
-	}
-
-	commands := []string{
-		fmt.Sprintf("mkdir -p %s 2>&1 || echo 'Warning: Could not create directory'", mountPath),
-		fmt.Sprintf("(chown 1001:0 %s 2>&1 || echo 'Warning: Could not change ownership')", mountPath),
-		fmt.Sprintf("ls -la %s 2>&1", mountPath),
-	}
-	command := strings.Join(commands, " && ")
-
-	initContainer := corev1.Container{
-		Name:  "update-pvc-permissions",
-		Image: image,
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			// Try to set permissions, but don't fail if we can't
-			command,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "lls-storage",
-				MountPath: mountPath,
-			},
-		},
-		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                ptr.To(int64(0)), // Run as root to be able to change ownership
-			RunAsGroup:               ptr.To(int64(0)),
-			AllowPrivilegeEscalation: ptr.To(false),
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-		},
-	}
-
-	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 }
 
 // configureEmptyDirStorage sets up temporary storage using emptyDir.
@@ -609,8 +578,9 @@ func configurePodOverrides(instance *llamav1alpha1.LlamaStackDistribution, podSp
 	}
 
 	// Set fsGroup to allow write access to mounted volumes
+	const defaultFSGroup = 1001
 	if podSpec.SecurityContext.FSGroup == nil {
-		podSpec.SecurityContext.FSGroup = ptr.To(int64(0))
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(defaultFSGroup))
 	}
 
 	// Apply other pod overrides if specified
