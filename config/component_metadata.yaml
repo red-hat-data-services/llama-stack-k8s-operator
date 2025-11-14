@@ -1,6 +1,6 @@
 releases:
   - name: Llama Stack
-    version: v0.2.23
+    version: v0.3.0
     repoUrl: https://github.com/opendatahub-io/llama-stack-distribution
   - name: Llama Stack Operator
     version: v0.4.0
