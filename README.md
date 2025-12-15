@@ -15,6 +15,7 @@ This repo hosts a kubernetes operator that is responsible for creating and manag
 - [Quick Start](#quick-start)
     - [Installation](#installation)
     - [Deploying Llama Stack Server](#deploying-the-llama-stack-server)
+- [Enabling Network Policies](#enabling-network-policies)
 - [Developer Guide](#developer-guide)
     - [Prerequisites](#prerequisites)
     - [Building the Operator](#building-the-operator)
@@ -80,11 +81,10 @@ spec:
   replicas: 1
   server:
     distribution:
-      name: ollama
+      name: starter
     containerSpec:
-      port: 8321
       env:
-      - name: INFERENCE_MODEL
+      - name: OLLAMA_INFERENCE_MODEL
         value: "llama3.2:1b"
       - name: OLLAMA_URL
         value: "http://ollama-server-service.ollama-dist.svc.cluster.local:11434"
@@ -103,6 +103,65 @@ Example to create a run.yaml ConfigMap, and a LlamaStackDistribution that refere
 ```
 kubectl apply -f config/samples/example-with-configmap.yaml
 ```
+
+## Enabling Network Policies
+
+The operator can create an ingress-only `NetworkPolicy` for every `LlamaStackDistribution` to ensure traffic is limited to:
+- Other pods in the same namespace that are part of the Llama Stack deployment (`app.kubernetes.io/part-of: llama-stack`)
+- Components that run inside the operator namespace (default: `llama-stack-k8s-operator-system`)
+
+This behavior is guarded by a feature flag and is disabled by default to avoid interfering with existing cluster-level policies. To enable it:
+
+1. Identify the namespace where the operator is running. If you used the provided manifests, it is `llama-stack-k8s-operator-system`.
+2. Create or update the `llama-stack-operator-config` ConfigMap in that namespace so the `featureFlags` entry enables the network policy flag.
+
+```bash
+cat <<'EOF' > feature-flags.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-stack-operator-config
+  namespace: llama-stack-k8s-operator-system
+data:
+  featureFlags: |
+    enableNetworkPolicy:
+      enabled: true
+EOF
+
+kubectl apply -f feature-flags.yaml
+```
+
+Within the next reconciliation loop the operator will begin creating a `<name>-network-policy` resource for each distribution.
+Set `enabled: false` (or remove the block) to turn the feature back off; the operator will delete the previously managed policies.
+
+## Image Mapping Overrides
+
+The operator supports ConfigMap-driven image updates for LLS Distribution images. This allows independent patching for security fixes or bug fixes without requiring a new operator version.
+
+### Configuration
+
+Create or update the operator ConfigMap with an `image-overrides` key:
+
+```yaml
+
+  image-overrides: |
+    starter-gpu: quay.io/custom/llama-stack:starter-gpu
+    starter: quay.io/custom/llama-stack:starter
+```
+
+### Configuration Format
+
+Use the distribution name directly as the key (e.g., `starter-gpu`, `starter`). The operator will apply these overrides automatically
+
+### Example Usage
+
+To update the LLS Distribution image for all `starter` distributions:
+
+```bash
+kubectl patch configmap llama-stack-operator-config -n llama-stack-k8s-operator-system --type merge -p '{"data":{"image-overrides":"starter: quay.io/opendatahub/llama-stack:latest"}}'
+```
+
+This will cause all LlamaStackDistribution resources using the `starter` distribution to restart with the new image.
 
 ## Developer Guide
 
@@ -133,6 +192,48 @@ kubectl apply -f config/samples/example-with-configmap.yaml
 
   The default image used is `quay.io/llamastack/llama-stack-k8s-operator:latest` when not supply argument for `make image`
   To create a local file `local.mk` with env variables can overwrite the default values set in the `Makefile`.
+
+- Building multi-architecture images (ARM64, AMD64, etc.)
+
+  The operator supports building for multiple architectures including ARM64. To build and push multi-arch images:
+
+  ```commandline
+  make image-buildx IMG=quay.io/<username>/llama-stack-k8s-operator:<custom-tag>
+  ```
+
+  By default, this builds for `linux/amd64,linux/arm64`. You can customize the platforms by setting the `PLATFORMS` variable:
+
+  ```commandline
+  # Build for specific platforms
+  make image-buildx IMG=quay.io/<username>/llama-stack-k8s-operator:<custom-tag> PLATFORMS=linux/amd64,linux/arm64
+
+  # Add more architectures (e.g., for future support)
+  make image-buildx IMG=quay.io/<username>/llama-stack-k8s-operator:<custom-tag> PLATFORMS=linux/amd64,linux/arm64,linux/s390x,linux/ppc64le
+  ```
+
+  **Note**:
+  - The `image-buildx` target works with both Docker and Podman. It will automatically detect which tool is being used.
+  - **Native cross-compilation**: The Dockerfile uses `--platform=$BUILDPLATFORM` to run Go compilation natively on the build host, avoiding QEMU emulation for the build process. This dramatically improves build speed and reliability. Only the minimal final stage (package installation) runs under QEMU for cross-platform builds.
+  - **FIPS adherence**: Native builds use `CGO_ENABLED=1` with full OpenSSL FIPS support. Cross-compiled builds use `CGO_ENABLED=0` with pure Go FIPS (via `GOEXPERIMENT=strictfipsruntime`). Both approaches are Designed for FIPS.
+  - For Docker: Multi-arch builds require Docker Buildx. Ensure Docker Buildx is set up:
+
+    ```commandline
+    docker buildx create --name x-builder --use
+    ```
+
+  - For Podman: Podman 4.0+ supports `podman buildx` (experimental). If buildx is unavailable, the Makefile will automatically fall back to using podman's native manifest-based multi-arch build approach.
+  - The resulting images are multi-arch manifest lists, which means Kubernetes will automatically select the correct architecture when pulling the image.
+
+- Building ARM64-only images
+
+  To build a single ARM64 image (useful for testing or ARM-native systems):
+
+  ```commandline
+  make image-build-arm IMG=quay.io/<username>/llama-stack-k8s-operator:<custom-tag>
+  make image-push IMG=quay.io/<username>/llama-stack-k8s-operator:<custom-tag>
+  ```
+
+  This works with both Docker and Podman.
 
 - Once the image is created, the operator can be deployed directly. For each deployment method a
   kubeconfig should be exported
