@@ -21,15 +21,23 @@ env:
   GIT_USER_EMAIL: github-actions[bot]@users.noreply.github.com
 
 jobs:
+  test-e2e:
+    uses: ./.github/workflows/run-e2e-test.yml
+
   generate-release:
     runs-on: ubuntu-24.04
+    needs: test-e2e
+    if: always()
     outputs:
       operator_version: ${{ steps.validate.outputs.operator_version }}
       llamastack_version: ${{ steps.validate.outputs.llamastack_version }}
       release_branch: ${{ steps.validate.outputs.release_branch }}
+      e2e_success: ${{ needs.test-e2e.outputs.success }}
+      e2e_summary: ${{ needs.test-e2e.outputs.summary }}
+      e2e_run_url: ${{ needs.test-e2e.outputs.run_url }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           fetch-depth: 0  # Need full history to check existing tags
 
@@ -90,7 +98,7 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 #v 5.5.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c #v 6.1.0
         with:
           go-version-file: go.mod
 
@@ -101,7 +109,7 @@ jobs:
           make release VERSION=${{ steps.validate.outputs.operator_version }} LLAMASTACK_VERSION=${{ steps.validate.outputs.llamastack_version }}
 
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
         with:
           python-version: '3.12'
 
@@ -157,10 +165,28 @@ jobs:
         run: |
           make test
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Check E2E Test Results
+        run: |
+          echo "E2E Test Results:"
+          echo "Success: ${{ needs.test-e2e.outputs.success }}"
+          echo "Summary: ${{ needs.test-e2e.outputs.summary }}"
+          echo "Run URL: ${{ needs.test-e2e.outputs.run_url }}"
+
+          if [ "${{ needs.test-e2e.outputs.success }}" != "true" ]; then
+            echo "E2E tests failed - release cannot proceed"
+            echo "Check detailed logs: ${{ needs.test-e2e.outputs.run_url }}"
+            exit 1
+          else
+            echo "E2E tests passed - proceeding with release"
+          fi
+
       - name: Validate build release image
         shell: bash
         run: |
-          make image-build IMG=quay.io/llamastack/llama-stack-k8s-operator:v${{ steps.validate.outputs.operator_version }}
+          make image-buildx-build IMG=quay.io/llamastack/llama-stack-k8s-operator:v${{ steps.validate.outputs.operator_version }}
 
       - name: Commit and push changes
         shell: bash
@@ -186,7 +212,7 @@ jobs:
       release_branch: ${{ needs.generate-release.outputs.release_branch }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           ref: ${{ env.release_branch }}
           fetch-depth: 0
@@ -243,27 +269,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
         with:
           go-version-file: go.mod
 
-      - name: Build release image
-        shell: bash
-        run: |
-          make image-build IMG=quay.io/llamastack/llama-stack-k8s-operator:v${{ env.operator_version }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to Quay.io
-        uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2.2.0
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: quay.io
           username: ${{ secrets.APP_QUAY_USERNAME }}
           password: ${{ secrets.APP_QUAY_TOKEN }}
 
-      - name: Push release image
+      - name: Build and push multi-arch release image
         shell: bash
         run: |
-          make image-push IMG=quay.io/llamastack/llama-stack-k8s-operator:v${{ env.operator_version }}
-          echo "✅ Pushed: quay.io/llamastack/llama-stack-k8s-operator:v${{ env.operator_version }}"
+          make image-buildx IMG=quay.io/llamastack/llama-stack-k8s-operator:v${{ env.operator_version }}
+          echo "✅ Pushed multi-arch image: quay.io/llamastack/llama-stack-k8s-operator:v${{ env.operator_version }}"
 
       - name: Release complete
         shell: bash

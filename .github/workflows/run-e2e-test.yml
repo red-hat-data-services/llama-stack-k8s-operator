@@ -4,16 +4,31 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [ main ]
+  workflow_call:
+    outputs:
+      success:
+        description: 'Whether the e2e tests passed successfully'
+        value: ${{ jobs.e2e-tests.outputs.success }}
+      summary:
+        description: 'High-level summary of test results'
+        value: ${{ jobs.e2e-tests.outputs.summary }}
+      run_url:
+        description: 'URL to this workflow run for detailed logs'
+        value: ${{ jobs.e2e-tests.outputs.run_url }}
 
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
+    outputs:
+      success: ${{ steps.test-results.outputs.success }}
+      summary: ${{ steps.test-results.outputs.summary }}
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
         with:
           go-version-file: go.mod
 
@@ -49,7 +64,7 @@ jobs:
 
       - name: Create k8s Kind Cluster
         id: kind
-        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
         with:
           registry: true
           registry_name: kind-registry
@@ -59,11 +74,11 @@ jobs:
 
       - name: Build operator image
         run: |
-          # Build the image with a simpler tag format
-          docker build -t kind-registry:5000/llama-stack-k8s-operator:pr${{ github.event.pull_request.number }} -f Dockerfile .
+          # Build the image with run-based tag for uniqueness
+          docker build -t kind-registry:5000/llama-stack-k8s-operator:run-${{ github.run_id }} -f Dockerfile .
 
           # Tag the image for local registry
-          docker tag kind-registry:5000/llama-stack-k8s-operator:pr${{ github.event.pull_request.number }} kind-registry:5000/llama-stack-k8s-operator:latest
+          docker tag kind-registry:5000/llama-stack-k8s-operator:run-${{ github.run_id }} kind-registry:5000/llama-stack-k8s-operator:latest
 
       - name: Push operator image to local registry
         run: |
@@ -87,6 +102,18 @@ jobs:
         run: |
           make test-e2e
 
+      - name: Set test results
+        id: test-results
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "summary=E2E tests passed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "summary=E2E tests failed - check logs for details" >> $GITHUB_OUTPUT
+          fi
+
       - name: Get logs
         if: ${{ always() }}
         run: |
@@ -98,7 +125,7 @@ jobs:
 
       - name: Upload all logs to artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
