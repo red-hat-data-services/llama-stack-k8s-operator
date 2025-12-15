@@ -69,7 +69,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: llamav1alpha1.DefaultMountPath},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "8321"},
 					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
@@ -161,7 +161,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					MountPath: llamav1alpha1.DefaultMountPath,
 				}},
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: llamav1alpha1.DefaultMountPath},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "8321"},
 					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
@@ -194,7 +194,7 @@ func TestBuildContainerSpec(t *testing.T) {
 				Ports:        []corev1.ContainerPort{{ContainerPort: llamav1alpha1.DefaultServerPort}},
 				StartupProbe: newDefaultStartupProbe(llamav1alpha1.DefaultServerPort),
 				Env: []corev1.EnvVar{
-					{Name: "HF_HOME", Value: "/.llama"},
+					{Name: "HF_HOME", Value: llamav1alpha1.DefaultMountPath},
 					{Name: "LLS_WORKERS", Value: "4"},
 					{Name: "LLS_PORT", Value: "8321"},
 					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
