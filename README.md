@@ -104,6 +104,90 @@ Example to create a run.yaml ConfigMap, and a LlamaStackDistribution that refere
 kubectl apply -f config/samples/example-with-configmap.yaml
 ```
 
+## Enabling Network Policies
+
+The operator can create an ingress-only `NetworkPolicy` for each `LlamaStackDistribution`. By default, traffic is limited to:
+- Pods with label `app.kubernetes.io/part-of: llama-stack` in the same namespace
+- The operator namespace (`llama-stack-k8s-operator-system`)
+
+### Enable the Feature Flag
+
+Network policies are disabled by default. Enable via ConfigMap:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-stack-operator-config
+  namespace: llama-stack-k8s-operator-system
+data:
+  featureFlags: |
+    enableNetworkPolicy:
+      enabled: true
+EOF
+```
+
+### Configure Per-Instance Access
+
+Use `spec.network` to customize access controls:
+
+```yaml
+apiVersion: llamastack.io/v1alpha1
+kind: LlamaStackDistribution
+metadata:
+  name: my-llsd
+spec:
+  server:
+    distribution:
+      name: starter
+  network:
+    exposeRoute: false          # Set true to create an Ingress for external access
+    allowedFrom:
+      namespaces:               # Explicit namespace names
+        - my-app-namespace
+        - monitoring
+      labels:                   # Namespaces matching these label keys
+        - team=frontend
+```
+
+| Field | Description |
+|-------|-------------|
+| `network.exposeRoute` | When `true`, creates an Ingress for external access (default: `false`) |
+| `network.allowedFrom.namespaces` | List of namespace names allowed to access the service. Use `"*"` to allow all namespaces |
+| `network.allowedFrom.labels` | List of namespace label keys. Namespaces with these labels are allowed |
+
+Set `enabled: false` in the ConfigMap to disable; the operator will delete the managed policies.
+
+## Image Mapping Overrides
+
+The operator supports ConfigMap-driven image updates for LLS Distribution images. This allows independent patching for security fixes or bug fixes without requiring a new operator version.
+
+### Configuration
+
+Create or update the operator ConfigMap with an `image-overrides` key:
+
+```yaml
+
+  image-overrides: |
+    starter-gpu: quay.io/custom/llama-stack:starter-gpu
+    starter: quay.io/custom/llama-stack:starter
+```
+
+### Configuration Format
+
+Use the distribution name directly as the key (e.g., `starter-gpu`, `starter`). The operator will apply these overrides automatically
+
+### Example Usage
+
+To update the LLS Distribution image for all `starter` distributions:
+
+```bash
+kubectl patch configmap llama-stack-operator-config -n llama-stack-k8s-operator-system --type merge -p '{"data":{"image-overrides":"starter: quay.io/opendatahub/llama-stack:latest"}}'
+```
+
+This will cause all LlamaStackDistribution resources using the `starter` distribution to restart with the new image.
+
 ## Developer Guide
 
 ### Prerequisites

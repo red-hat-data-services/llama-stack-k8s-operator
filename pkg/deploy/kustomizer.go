@@ -3,9 +3,11 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sort"
 
 	llamav1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
 	"github.com/llamastack/llama-stack-k8s-operator/pkg/compare"
@@ -24,7 +26,10 @@ import (
 	"sigs.k8s.io/kustomize/api/resmap"
 	"sigs.k8s.io/kustomize/api/resource"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
+	yamlpkg "sigs.k8s.io/yaml"
 )
+
+const deploymentKind = "Deployment"
 
 // RenderManifest takes a manifest directory and transforms it through
 // kustomization and plugins to produce final Kubernetes resources.
@@ -198,6 +203,8 @@ func patchResource(ctx context.Context, cli client.Client, desired, existing *un
 func applyPlugins(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStackDistribution) error {
 	namePrefixPlugin := plugins.CreateNamePrefixPlugin(plugins.NamePrefixConfig{
 		Prefix: ownerInstance.GetName(),
+		// Exclude Deployment to maintain backward compatibility with existing deployment names
+		ExcludeKinds: []string{deploymentKind},
 	})
 	if err := namePrefixPlugin.Transform(*resMap); err != nil {
 		return fmt.Errorf("failed to apply name prefix: %w", err)
@@ -212,61 +219,137 @@ func applyPlugins(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStack
 	}
 
 	fieldTransformerPlugin := plugins.CreateFieldMutator(plugins.FieldMutatorConfig{
-		Mappings: []plugins.FieldMapping{
-			{
-				SourceValue:       getStorageSize(ownerInstance),
-				DefaultValue:      llamav1alpha1.DefaultStorageSize.String(),
-				TargetField:       "/spec/resources/requests/storage",
-				TargetKind:        "PersistentVolumeClaim",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       ownerInstance.GetNamespace(),
-				TargetField:       "/subjects/0/namespace",
-				TargetKind:        "ClusterRoleBinding",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       ownerInstance.GetName() + "-sa",
-				TargetField:       "/subjects/0/name",
-				TargetKind:        "ClusterRoleBinding",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       getServicePort(ownerInstance),
-				DefaultValue:      llamav1alpha1.DefaultServerPort,
-				TargetField:       "/spec/ports/0/port",
-				TargetKind:        "Service",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       getServicePort(ownerInstance),
-				DefaultValue:      llamav1alpha1.DefaultServerPort,
-				TargetField:       "/spec/ports/0/targetPort",
-				TargetKind:        "Service",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       nil,
-				DefaultValue:      llamav1alpha1.DefaultLabelValue,
-				TargetField:       "/spec/selector/" + llamav1alpha1.DefaultLabelKey,
-				TargetKind:        "Service",
-				CreateIfNotExists: true,
-			},
-			{
-				SourceValue:       nil,
-				DefaultValue:      ownerInstance.GetName(),
-				TargetField:       "/spec/selector/app.kubernetes.io~1instance",
-				TargetKind:        "Service",
-				CreateIfNotExists: true,
-			},
-		},
+		Mappings: getFieldMappings(ownerInstance),
 	})
 	if err := fieldTransformerPlugin.Transform(*resMap); err != nil {
 		return fmt.Errorf("failed to apply field transformer: %w", err)
 	}
 
+	// Apply NetworkPolicy transformer to configure ingress rules based on spec.network
+	if err := applyNetworkPolicyTransformer(resMap, ownerInstance); err != nil {
+		return fmt.Errorf("failed to apply NetworkPolicy transformer: %w", err)
+	}
+
 	return nil
+}
+
+// applyNetworkPolicyTransformer applies the NetworkPolicy transformer plugin.
+func applyNetworkPolicyTransformer(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStackDistribution) error {
+	operatorNS, err := GetOperatorNamespace()
+	if err != nil {
+		operatorNS = "llama-stack-k8s-operator-system"
+	}
+
+	npTransformer := plugins.CreateNetworkPolicyTransformer(plugins.NetworkPolicyTransformerConfig{
+		InstanceName:      ownerInstance.GetName(),
+		ServicePort:       GetServicePort(ownerInstance),
+		OperatorNamespace: operatorNS,
+		NetworkSpec:       ownerInstance.Spec.Network,
+	})
+
+	return npTransformer.Transform(*resMap)
+}
+
+// getFieldMappings returns essential field mappings for kustomize transformation.
+func getFieldMappings(ownerInstance *llamav1alpha1.LlamaStackDistribution) []plugins.FieldMapping {
+	instanceName := ownerInstance.GetName()
+	instanceNamespace := ownerInstance.GetNamespace()
+	serviceAccountName := instanceName + "-sa"
+	servicePort := getServicePort(ownerInstance)
+	storageSize := getStorageSize(ownerInstance)
+	instanceLabelPath := "/app.kubernetes.io~1instance"
+
+	return buildFieldMappings(instanceName, instanceNamespace, serviceAccountName, servicePort, storageSize, instanceLabelPath, ownerInstance.Spec.Replicas)
+}
+
+// buildFieldMappings constructs the field mappings array.
+func buildFieldMappings(instanceName, instanceNamespace, serviceAccountName string,
+	servicePort any, storageSize, instanceLabelPath string, replicas int32) []plugins.FieldMapping {
+	var replicaSourceValue any = replicas
+	return []plugins.FieldMapping{
+		{
+			SourceValue:       storageSize,
+			DefaultValue:      llamav1alpha1.DefaultStorageSize.String(),
+			TargetField:       "/spec/resources/requests/storage",
+			TargetKind:        "PersistentVolumeClaim",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       servicePort,
+			DefaultValue:      llamav1alpha1.DefaultServerPort,
+			TargetField:       "/spec/ports/0/port",
+			TargetKind:        "Service",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       servicePort,
+			DefaultValue:      llamav1alpha1.DefaultServerPort,
+			TargetField:       "/spec/ports/0/targetPort",
+			TargetKind:        "Service",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceName,
+			TargetField:       "/spec/selector" + instanceLabelPath,
+			TargetKind:        "Service",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceName,
+			TargetField:       "/metadata/name",
+			TargetKind:        "Deployment",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       replicaSourceValue,
+			TargetField:       "/spec/replicas",
+			TargetKind:        "Deployment",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       serviceAccountName,
+			TargetField:       "/spec/template/spec/serviceAccountName",
+			TargetKind:        "Deployment",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceName,
+			TargetField:       "/spec/selector/matchLabels" + instanceLabelPath,
+			TargetKind:        "Deployment",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceName,
+			TargetField:       "/spec/template/metadata/labels" + instanceLabelPath,
+			TargetKind:        "Deployment",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       serviceAccountName,
+			TargetField:       "/subjects/0/name",
+			TargetKind:        "RoleBinding",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceNamespace,
+			TargetField:       "/subjects/0/namespace",
+			TargetKind:        "RoleBinding",
+			CreateIfNotExists: true,
+		},
+		// ClusterRoleBinding subject for ServiceAccount
+		{
+			SourceValue:       serviceAccountName,
+			TargetField:       "/subjects/0/name",
+			TargetKind:        "ClusterRoleBinding",
+			CreateIfNotExists: true,
+		},
+		{
+			SourceValue:       instanceNamespace,
+			TargetField:       "/subjects/0/namespace",
+			TargetKind:        "ClusterRoleBinding",
+			CreateIfNotExists: true,
+		},
+	}
 }
 
 // getStorageSize extracts the storage size from the CR spec.
@@ -284,6 +367,173 @@ func getServicePort(instance *llamav1alpha1.LlamaStackDistribution) any {
 		return instance.Spec.Server.ContainerSpec.Port
 	}
 	// Returning nil signals the field transformer to use the default value.
+	return nil
+}
+
+// ManifestContext provides the necessary context for complex resource rendering.
+type ManifestContext struct {
+	ResolvedImage string
+	ConfigMapHash string
+	CABundleHash  string
+	ContainerSpec map[string]any
+	PodSpec       map[string]any
+}
+
+// RenderManifestWithContext renders manifests and enhances the Deployment with complex specs.
+func RenderManifestWithContext(
+	fs filesys.FileSystem,
+	manifestsPath string,
+	ownerInstance *llamav1alpha1.LlamaStackDistribution,
+	manifestCtx *ManifestContext,
+) (*resmap.ResMap, error) {
+	// First, render the base manifests
+	resMap, err := RenderManifest(fs, manifestsPath, ownerInstance)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render base manifests: %w", err)
+	}
+
+	// If no manifest context provided, return base manifests
+	if manifestCtx == nil {
+		return resMap, nil
+	}
+
+	// Update the resources with the manifest context
+	for _, res := range (*resMap).Resources() {
+		if res.GetKind() == deploymentKind {
+			if err := updateDeploymentSpec(res, manifestCtx); err != nil {
+				return nil, fmt.Errorf("failed to update Deployment: %w", err)
+			}
+		}
+	}
+
+	return resMap, nil
+}
+
+// updateDeploymentSpec updates the Deployment spec with the manifest context.
+func updateDeploymentSpec(res *resource.Resource, manifestCtx *ManifestContext) error {
+	// Parse the deployment YAML
+	data, err := parseResourceYAML(res)
+	if err != nil {
+		return err
+	}
+
+	// Navigate to template spec
+	templateSpec, err := getDeploymentTemplateSpec(data)
+	if err != nil {
+		return err
+	}
+
+	// Apply pod spec enhancements
+	// Sort keys to ensure deterministic ordering and prevent spurious deployment updates
+	if manifestCtx.PodSpec != nil {
+		keys := make([]string, 0, len(manifestCtx.PodSpec))
+		for key := range manifestCtx.PodSpec {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		for _, key := range keys {
+			templateSpec[key] = manifestCtx.PodSpec[key]
+		}
+	}
+
+	// Add ConfigMap hash annotations
+	if err := addConfigMapAnnotations(data, manifestCtx); err != nil {
+		return err
+	}
+
+	// Update the resource with the manifest context
+	return updateResourceFromData(res, data)
+}
+
+// parseResourceYAML parses a resource YAML into a map.
+func parseResourceYAML(res *resource.Resource) (map[string]any, error) {
+	yamlBytes, err := res.AsYAML()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get YAML: %w", err)
+	}
+
+	var data map[string]any
+	if unmarshalErr := yamlpkg.Unmarshal(yamlBytes, &data); unmarshalErr != nil {
+		return nil, fmt.Errorf("failed to unmarshal YAML: %w", unmarshalErr)
+	}
+
+	return data, nil
+}
+
+// getDeploymentTemplateSpec navigates to the deployment template spec.
+func getDeploymentTemplateSpec(data map[string]any) (map[string]any, error) {
+	spec, ok := data["spec"].(map[string]any)
+	if !ok {
+		return nil, errors.New("failed to find deployment spec")
+	}
+
+	template, ok := spec["template"].(map[string]any)
+	if !ok {
+		return nil, errors.New("failed to find deployment template")
+	}
+
+	templateSpec, ok := template["spec"].(map[string]any)
+	if !ok {
+		return nil, errors.New("failed to find deployment template spec")
+	}
+
+	return templateSpec, nil
+}
+
+// addConfigMapAnnotations adds ConfigMap hash annotations to the deployment template.
+func addConfigMapAnnotations(data map[string]any, manifestCtx *ManifestContext) error {
+	spec, ok := data["spec"].(map[string]any)
+	if !ok {
+		return errors.New("failed to find deployment spec in data")
+	}
+
+	template, ok := spec["template"].(map[string]any)
+	if !ok {
+		return errors.New("failed to find deployment template in spec")
+	}
+
+	templateMeta, ok := template["metadata"].(map[string]any)
+	if !ok {
+		templateMeta = make(map[string]any)
+		template["metadata"] = templateMeta
+	}
+
+	annotations, ok := templateMeta["annotations"].(map[string]any)
+	if !ok {
+		annotations = make(map[string]any)
+		templateMeta["annotations"] = annotations
+	}
+
+	if manifestCtx.ConfigMapHash != "" {
+		annotations["configmap.hash/user-config"] = manifestCtx.ConfigMapHash
+	}
+	if manifestCtx.CABundleHash != "" {
+		annotations["configmap.hash/ca-bundle"] = manifestCtx.CABundleHash
+	}
+
+	return nil
+}
+
+// updateResourceFromData updates the resource with the modified data.
+func updateResourceFromData(res *resource.Resource, data map[string]any) error {
+	updatedJSON, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated data: %w", err)
+	}
+
+	updatedYAML, err := yamlpkg.JSONToYAML(updatedJSON)
+	if err != nil {
+		return fmt.Errorf("failed to convert JSON to YAML: %w", err)
+	}
+
+	rf := resource.NewFactory(nil)
+	newRes, err := rf.FromBytes(updatedYAML)
+	if err != nil {
+		return fmt.Errorf("failed to create resource from updated YAML: %w", err)
+	}
+
+	res.ResetRNode(newRes)
 	return nil
 }
 
