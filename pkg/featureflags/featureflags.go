@@ -17,5 +17,5 @@ const (
 	// EnableNetworkPolicyKey is the key for the network policy feature flag.
 	EnableNetworkPolicyKey = "enableNetworkPolicy"
 	// NetworkPolicyDefaultValue is the default value for the network policy feature flag.
-	NetworkPolicyDefaultValue = false
+	NetworkPolicyDefaultValue = true
 )
