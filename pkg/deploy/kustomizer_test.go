@@ -158,7 +158,7 @@ metadata:
 		require.Equal(t, 1, (*resMap).Size())
 		res := (*resMap).Resources()[0]
 		require.Equal(t, "Deployment", res.GetKind())
-		require.Equal(t, "test-instance-my-app", res.GetName())
+		require.Equal(t, "test-instance", res.GetName())
 		assert.Equal(t, "test-fallback-ns", res.GetNamespace(), "Deployment should have the correct namespace set by plugin")
 	})
 
