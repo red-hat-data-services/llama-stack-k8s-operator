@@ -897,7 +897,9 @@ func TestNewLlamaStackDistributionReconciler_WithImageOverrides(t *testing.T) {
 	require.Len(t, reconciler.ImageMappingOverrides, 1, "Should have one image override")
 	require.Equal(t, "quay.io/custom/llama-stack:starter",
 		reconciler.ImageMappingOverrides["starter"], "Override should match expected value")
-	require.False(t, reconciler.EnableNetworkPolicy, "Network policy should be disabled")
+	// Network policy is enabled by default when no CRs with version info exist
+	// (ConfigMap is updated with new defaults on startup)
+	require.True(t, reconciler.EnableNetworkPolicy, "Network policy should be enabled by default")
 }
 
 func TestConfigMapUpdateTriggersReconciliation(t *testing.T) {
@@ -956,6 +958,10 @@ func TestConfigMapUpdateTriggersReconciliation(t *testing.T) {
 	require.Equal(t, "default-starter-image", initialImage,
 		"Initial deployment should use distribution image")
 
+	require.NoError(t, k8sClient.Get(t.Context(), types.NamespacedName{
+		Name:      configMap.Name,
+		Namespace: configMap.Namespace,
+	}, configMap))
 	// Update ConfigMap with new overrides
 	configMap.Data["image-overrides"] = "starter: quay.io/custom/llama-stack:starter"
 	require.NoError(t, k8sClient.Update(t.Context(), configMap))
