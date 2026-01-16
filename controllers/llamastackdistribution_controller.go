@@ -1319,15 +1319,56 @@ func parseFeatureFlags(configMapData map[string]string) (bool, error) {
 	return flags.EnableNetworkPolicy.Enabled, nil
 }
 
+// needsConfigMapUpdate checks if the ConfigMap needs to be updated with new defaults.
+func needsConfigMapUpdate(ctx context.Context, c client.Client) bool {
+	list := &llamav1alpha1.LlamaStackDistributionList{}
+	if err := c.List(ctx, list); err != nil {
+		return false
+	}
+
+	currentVersion := os.Getenv("OPERATOR_VERSION")
+	hasCRWithVersion := false
+
+	for _, cr := range list.Items {
+		if cr.Status.Version.OperatorVersion != "" {
+			hasCRWithVersion = true
+			// Version mismatch means upgrade
+			if cr.Status.Version.OperatorVersion != currentVersion {
+				return true
+			}
+		}
+	}
+
+	// No CRs with version info - update ConfigMap
+	return !hasCRWithVersion
+}
+
+// patchConfigMapWithDefaults patches the ConfigMap with default feature flag values.
+func patchConfigMapWithDefaults(ctx context.Context, cli client.Client, configMap *corev1.ConfigMap, configMapName types.NamespacedName) error {
+	newConfigMap, err := createDefaultConfigMap(configMapName)
+	if err != nil {
+		return fmt.Errorf("failed to generate default configMap: %w", err)
+	}
+	// Use Patch to avoid conflict errors, only update featureFlags key
+	patch := client.MergeFrom(configMap.DeepCopy())
+	if configMap.Data == nil {
+		configMap.Data = make(map[string]string)
+	}
+	configMap.Data[featureflags.FeatureFlagsKey] = newConfigMap.Data[featureflags.FeatureFlagsKey]
+	if err = cli.Patch(ctx, configMap, patch); err != nil {
+		return fmt.Errorf("failed to patch ConfigMap: %w", err)
+	}
+	return nil
+}
+
 // NewLlamaStackDistributionReconciler creates a new reconciler with default image mappings.
-func NewLlamaStackDistributionReconciler(ctx context.Context, client client.Client, scheme *runtime.Scheme,
+func NewLlamaStackDistributionReconciler(ctx context.Context, cli client.Client, scheme *runtime.Scheme,
 	clusterInfo *cluster.ClusterInfo) (*LlamaStackDistributionReconciler, error) {
 	// get operator namespace
 	operatorNamespace, err := deploy.GetOperatorNamespace()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get operator namespace: %w", err)
 	}
-
 	// Get the ConfigMap
 	// If the ConfigMap doesn't exist, create it with default feature flags
 	// If the ConfigMap exists, parse the feature flags from the Configmap
@@ -1337,7 +1378,7 @@ func NewLlamaStackDistributionReconciler(ctx context.Context, client client.Clie
 		Namespace: operatorNamespace,
 	}
 
-	if err = client.Get(ctx, configMapName, configMap); err != nil {
+	if err = cli.Get(ctx, configMapName, configMap); err != nil {
 		if !k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get ConfigMap: %w", err)
 		}
@@ -1348,8 +1389,13 @@ func NewLlamaStackDistributionReconciler(ctx context.Context, client client.Clie
 			return nil, fmt.Errorf("failed to generate default configMap: %w", err)
 		}
 
-		if err = client.Create(ctx, configMap); err != nil {
+		if err = cli.Create(ctx, configMap); err != nil {
 			return nil, fmt.Errorf("failed to create ConfigMap: %w", err)
+		}
+	} else if needsConfigMapUpdate(ctx, cli) {
+		// Update ConfigMap: no CRs with version info, or version mismatch (upgrade)
+		if err = patchConfigMapWithDefaults(ctx, cli, configMap, configMapName); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1359,7 +1405,7 @@ func NewLlamaStackDistributionReconciler(ctx context.Context, client client.Clie
 		return nil, fmt.Errorf("failed to parse feature flags: %w", err)
 	}
 	return &LlamaStackDistributionReconciler{
-		Client:              client,
+		Client:              cli,
 		Scheme:              scheme,
 		EnableNetworkPolicy: enableNetworkPolicy,
 		ClusterInfo:         clusterInfo,
