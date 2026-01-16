@@ -1818,6 +1818,22 @@ func initializeOperatorConfigMap(ctx context.Context, c client.Client, operatorN
 
 	err := c.Get(ctx, configMapName, configMap)
 	if err == nil {
+		// ConfigMap exists, check if we need to update it (upgrade scenario)
+		if needsConfigMapUpdate(ctx, c) {
+			newConfigMap, genErr := createDefaultConfigMap(configMapName)
+			if genErr != nil {
+				return nil, fmt.Errorf("failed to generate default configMap: %w", genErr)
+			}
+			patch := client.MergeFrom(configMap.DeepCopy())
+			// Only update the featureFlags key, preserve other keys (like image-overrides)
+			if configMap.Data == nil {
+				configMap.Data = make(map[string]string)
+			}
+			configMap.Data[featureflags.FeatureFlagsKey] = newConfigMap.Data[featureflags.FeatureFlagsKey]
+			if err = c.Patch(ctx, configMap, patch); err != nil {
+				return nil, fmt.Errorf("failed to patch ConfigMap: %w", err)
+			}
+		}
 		return configMap, nil
 	}
 
@@ -1836,6 +1852,30 @@ func initializeOperatorConfigMap(ctx context.Context, c client.Client, operatorN
 	}
 
 	return configMap, nil
+}
+
+// needsConfigMapUpdate checks if the ConfigMap needs to be updated with new defaults.
+func needsConfigMapUpdate(ctx context.Context, c client.Client) bool {
+	list := &llamav1alpha1.LlamaStackDistributionList{}
+	if err := c.List(ctx, list); err != nil {
+		return false
+	}
+
+	currentVersion := os.Getenv("OPERATOR_VERSION")
+	hasCRWithVersion := false
+
+	for _, cr := range list.Items {
+		if cr.Status.Version.OperatorVersion != "" {
+			hasCRWithVersion = true
+			// Version mismatch means upgrade
+			if cr.Status.Version.OperatorVersion != currentVersion {
+				return true
+			}
+		}
+	}
+
+	// No CRs with version info - update ConfigMap
+	return !hasCRWithVersion
 }
 
 func ParseImageMappingOverrides(ctx context.Context, configMapData map[string]string) map[string]string {
