@@ -1,6 +1,6 @@
   name: Build Operator Image
-                                                                                                                                                
-  on:                                                                                                                                         
+
+  on:
     pull_request_target:
       types: [closed]
 
@@ -71,4 +71,3 @@
             docker buildx imagetools create -t ${{ env.IMG }} \
               ${{ env.IMG }}-amd64 \
               ${{ env.IMG }}-arm64
-
