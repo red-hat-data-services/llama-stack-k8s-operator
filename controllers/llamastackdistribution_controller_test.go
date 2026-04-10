@@ -12,6 +12,7 @@ import (
 	llamav1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
 	controllers "github.com/llamastack/llama-stack-k8s-operator/controllers"
 	"github.com/llamastack/llama-stack-k8s-operator/pkg/cluster"
+	"github.com/llamastack/llama-stack-k8s-operator/pkg/featureflags"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -902,9 +903,10 @@ func TestNewLlamaStackDistributionReconciler_WithImageOverrides(t *testing.T) {
 	require.Len(t, reconciler.ImageMappingOverrides, 1, "Should have one image override")
 	require.Equal(t, "quay.io/custom/llama-stack:starter",
 		reconciler.ImageMappingOverrides["starter"], "Override should match expected value")
-	// Network policy is enabled by default when no CRs with version info exist
-	// (ConfigMap is updated with new defaults on startup)
-	require.True(t, reconciler.EnableNetworkPolicy, "Network policy should be enabled by default")
+	// When no CRs with version info exist, initializeOperatorConfigMap resets
+	// feature flags to defaults. The reconciler value must match the default.
+	require.Equal(t, featureflags.NetworkPolicyDefaultValue, reconciler.EnableNetworkPolicy,
+		"Network policy should match the default value from createDefaultConfigMap")
 }
 
 func TestConfigMapUpdateTriggersReconciliation(t *testing.T) {
@@ -997,6 +999,9 @@ func TestRefreshOperatorConfigPicksUpChanges(t *testing.T) {
 	operatorNamespace := createTestNamespace(t, "llama-stack-k8s-operator-system")
 	t.Setenv("OPERATOR_NAMESPACE", operatorNamespace.Name)
 
+	// Start with network policy enabled (the default).
+	// initializeOperatorConfigMap resets feature flags to defaults when no CRs
+	// have version info, so the initial value here matches what we get after init.
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "llama-stack-operator-config",
@@ -1004,7 +1009,7 @@ func TestRefreshOperatorConfigPicksUpChanges(t *testing.T) {
 		},
 		Data: map[string]string{
 			"featureFlags": `enableNetworkPolicy:
-    enabled: false`,
+    enabled: true`,
 		},
 	}
 	require.NoError(t, k8sClient.Create(t.Context(), configMap))
@@ -1030,17 +1035,16 @@ func TestRefreshOperatorConfigPicksUpChanges(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Initial reconcile creates resources.
+	// Initial reconcile creates resources including NetworkPolicy (enabled by default).
 	_, err = reconciler.Reconcile(t.Context(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace},
 	})
 	require.NoError(t, err)
 
-	// Verify network policy is NOT created (feature disabled).
+	// Verify network policy IS created (feature enabled by default).
 	networkPolicy := &networkingv1.NetworkPolicy{}
 	npName := instance.Name + "-network-policy"
-	err = k8sClient.Get(t.Context(), types.NamespacedName{Name: npName, Namespace: instance.Namespace}, networkPolicy)
-	require.True(t, apierrors.IsNotFound(err), "NetworkPolicy should not exist when feature is disabled")
+	waitForResource(t, k8sClient, instance.Namespace, npName, networkPolicy)
 
 	// Re-fetch the ConfigMap to get the latest resource version (initializeOperatorConfigMap
 	// may have updated it to add the watch label).
@@ -1049,9 +1053,9 @@ func TestRefreshOperatorConfigPicksUpChanges(t *testing.T) {
 		Namespace: configMap.Namespace,
 	}, configMap))
 
-	// Enable network policy via operator config update.
+	// Disable network policy via operator config update.
 	configMap.Data["featureFlags"] = `enableNetworkPolicy:
-    enabled: true`
+    enabled: false`
 	require.NoError(t, k8sClient.Update(t.Context(), configMap))
 
 	// Reconcile again -- refreshOperatorConfig picks up the new flag.
@@ -1060,8 +1064,9 @@ func TestRefreshOperatorConfigPicksUpChanges(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify network policy IS created now.
-	waitForResource(t, k8sClient, instance.Namespace, npName, networkPolicy)
+	// Verify network policy is deleted now that the feature is disabled.
+	err = k8sClient.Get(t.Context(), types.NamespacedName{Name: npName, Namespace: instance.Namespace}, networkPolicy)
+	require.True(t, apierrors.IsNotFound(err), "NetworkPolicy should not exist when feature is disabled")
 }
 
 func TestReconcileRequeuesAfterSuccess(t *testing.T) {
